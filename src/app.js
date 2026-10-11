@@ -6,6 +6,7 @@ import { detectLocalLegacyData, isLegacyBackup, runLegacyImport, legacyImportDon
 import { MUSCLE_SLUGS, UPPER_SLUGS, LOWER_SLUGS, CORE_SLUGS, muscleLabel, slugMuscles, hasOnlySlugs } from './muscles.js';
 import { renderBodySVG } from './body-map.js';
 import { buildExport } from './export.js';
+import TEMPLATES_SQL from '../supabase/003_templates.sql?raw';
 import { buildStatsIndex, previousPerformance, personalBests, sessionPRs, countedSets, hasValues,
   workoutLiftedKg, workoutPRs, exerciseHistory, PR_LABELS } from './stats.js';
 import { muscleHeat, heatColor, HEAT_ZERO, HEAT_STOPS, NON_MUSCLE_FILL, WINDOW_DAYS } from './heatmap.js';
@@ -142,7 +143,11 @@ const Router = {
   matchExercise(path)    { const m=path.match(/^\/exercise\/([^/]+)$/);      return m?m[1]:null; },
 
   init() {
-    window.addEventListener('hashchange', ()=>Router.route());
+    window.addEventListener('hashchange', ()=>{
+      // Real navigation (incl. back/forward): don't leave sheets over the new screen.
+      document.querySelectorAll('.modal-overlay, .confirm-dialog').forEach(el=>el.remove());
+      Router.route();
+    });
     Router.route();
   },
 
@@ -182,6 +187,8 @@ const Router = {
     else if (path === '/history')        container.innerHTML = renderHistory();
     else if (Router.matchHistoryEdit(path)) container.innerHTML = renderPastEditor(Router.matchHistoryEdit(path));
     else if (Router.matchHistory(path))  container.innerHTML = renderHistoryDetail(Router.matchHistory(path));
+    else if (path === '/templates')      container.innerHTML = renderTemplates();
+    else if (Router.matchTemplate(path)) container.innerHTML = renderTemplateEditor(Router.matchTemplate(path));
     else if (path === '/library')        container.innerHTML = renderLibrary();
     else if (Router.matchExercise(path)) { container.innerHTML = renderExerciseDetail(Router.matchExercise(path)); drawExerciseChart(); }
     else if (path === '/progress')       { container.innerHTML = renderProgress(); initHeatmapCarousel(); drawWeightChart(); }
@@ -608,7 +615,7 @@ function renderPicker() {
     <div class="screen">
       <div class="picker-header">
         <div class="picker-top-row">
-          <h1>Add Exercise</h1>
+          <h1>${pickerState.target?.kind==='template' ? 'Add to Template' : 'Add Exercise'}</h1>
           <button class="btn-ghost" data-action="picker-close">Cancel</button>
         </div>
         <div class="search-bar">
@@ -701,6 +708,7 @@ function renderWorkoutEditor(workout) {
       <div id="exercise-cards">${cards}</div>
       <div class="workout-actions">
         ${addBtn}
+        <button class="btn btn-secondary" data-action="save-template" data-wid="${workout.id}">Save as Template</button>
         <button class="btn btn-danger" data-action="delete-workout" data-id="${workout.id}">Delete Workout</button>
       </div>
     </div>`;
@@ -719,6 +727,7 @@ function renderWorkoutEditor(workout) {
       <div id="exercise-cards">${cards}</div>
       <div class="workout-actions">
         ${addBtn}
+        <button class="btn btn-secondary" data-action="save-template" data-wid="${workout.id}">Save as Template</button>
         <button class="btn btn-primary" data-action="finish-workout">Finish Workout</button>
       </div>
     </div>`;
@@ -1099,7 +1108,15 @@ function showPastWorkoutSheet(date = localDate()) {
   overlay.addEventListener('click', e=>{ if (e.target===overlay) closeModal('past-sheet'); });
 }
 
-function renderPastTemplateChoice() { return ''; }
+function renderPastTemplateChoice() {
+  const tpls = DB.templatesAvailable() ? DB.getTemplates().filter(t=>validItems(t).length) : [];
+  if (!tpls.length) return '';
+  return `<label class="field field-wide"><span>Template</span>
+    <select class="text-input" id="past-template">
+      <option value="">None — pick exercises</option>
+      ${tpls.map(t=>`<option value="${t.id}">${escHtml(t.name)}</option>`).join('')}
+    </select></label>`;
+}
 
 function savePastWorkout() {
   const r = readTimes('past'), err = document.getElementById('past-error');
@@ -1110,7 +1127,234 @@ function savePastWorkout() {
   Router.navigate(`/history/${w.id}/edit`);
 }
 
-function addPastTemplateSets() {}
+function addPastTemplateSets(w) {
+  const tpl = DB.getTemplate(document.getElementById('past-template')?.value || '');
+  const sets = tpl ? templateSets(w.id, tpl) : [];
+  if (sets.length) DB.saveSets(sets);
+}
+
+/* ── Templates ────────────────────────────────────────────────── */
+const MAX_TPL_SETS = 20;
+let templatesReturnTo = '/home';
+
+const validItems = tpl => (tpl.exercises || []).filter(i=>DB.getExercise(i.exercise_id));
+const clampSets  = n => Math.min(Math.max(Math.round(+n) || 1, 1), MAX_TPL_SETS);
+
+function templateSummary(tpl) {
+  const items = validItems(tpl);
+  if (!items.length) return 'No exercises';
+  const names = items.map(i=>DB.getExercise(i.exercise_id).name);
+  const sets  = items.reduce((t, i)=>t + clampSets(i.sets), 0);
+  return `${names.slice(0, 3).join(', ')}${names.length > 3 ? ` +${names.length - 3}` : ''} · ${sets} set${sets!==1?'s':''}`;
+}
+
+// Empty sets for every exercise in the template, in order.
+function templateSets(wid, tpl) {
+  let pos = nextPosition(wid) - 1;
+  return validItems(tpl).flatMap(i =>
+    Array.from({ length:clampSets(i.sets) }, () => makeSet(wid, i.exercise_id, null, { position:++pos })));
+}
+
+function templateItemsFromWorkout(wid) {
+  return groupSets(DB.getSetsForWorkout(wid))
+    .filter(g=>DB.getExercise(g.exerciseId))
+    .map(g=>({ exercise_id:g.exerciseId, sets:clampSets(g.sets.length) }));
+}
+
+function showStartSheet() {
+  if (document.getElementById('start-sheet')) return;
+  const tpls = DB.getTemplates();
+  const dumbbell = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6.5 6.5h11M6.5 17.5h11M2 12h2m16 0h2M4 10v4M20 10v4"/></svg>`;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'start-sheet';
+  overlay.innerHTML = `
+    <div class="bottom-sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-title">Start Workout</div>
+      <button class="start-option primary" data-action="start-empty">
+        <span class="start-option-icon">${dumbbell}</span>
+        <span><span class="start-option-name">Empty workout</span><span class="start-option-sub">Pick exercises as you go</span></span>
+      </button>
+      <div class="settings-label" style="padding:4px 2px 0">Templates</div>
+      ${tpls.length ? tpls.map(t=>`
+        <button class="start-option" data-action="start-template" data-tid="${t.id}" ${validItems(t).length ? '' : 'disabled'}>
+          <span><span class="start-option-name">${escHtml(t.name)}</span><span class="start-option-sub">${escHtml(templateSummary(t))}</span></span>
+        </button>`).join('')
+      : `<p class="sheet-note">No templates yet. Finish a workout and tap <strong>Save as Template</strong>, or create one.</p>`}
+      <div class="sheet-links">
+        <button class="btn-ghost" data-action="open-templates">${tpls.length ? 'Manage templates' : 'Create a template'}</button>
+        <button class="btn-ghost" data-action="log-past">Log a past workout</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  requestAnimationFrame(()=>overlay.classList.add('visible'));
+  overlay.addEventListener('click', e=>{ if (e.target===overlay) closeModal('start-sheet'); });
+}
+
+function startFromTemplate(tid) {
+  const tpl = DB.getTemplate(tid);
+  if (!tpl) return;
+  if (!validItems(tpl).length) { showToast('This template has no exercises.'); return; }
+  const begin = () => {
+    const w = createWorkout();
+    DB.saveSets(templateSets(w.id, tpl));
+    const skipped = (tpl.exercises || []).length - validItems(tpl).length;
+    closeModal('start-sheet');
+    Router.navigate('/workout/active');
+    if (skipped) showToast(`${skipped} exercise${skipped!==1?'s':''} in this template no longer exist${skipped===1?'s':''} and ${skipped===1?'was':'were'} skipped.`);
+  };
+  const active = DB.getActiveWorkout();
+  if (active) showConfirm('Discard', 'A workout is already in progress. Discard it?', ()=>{ DB.deleteWorkout(active.id); clearRest(); begin(); });
+  else begin();
+}
+
+// Small bottom sheet asking for a name; onSave gets the trimmed name.
+function showNameSheet({ title, initial = '', preview = [], confirmLabel = 'Save', onSave }) {
+  document.getElementById('name-sheet')?.remove();
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'name-sheet';
+  overlay.innerHTML = `
+    <div class="bottom-sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-title">${escHtml(title)}</div>
+      <input class="text-input" id="name-sheet-input" type="text" placeholder="e.g. Push Day" maxlength="40" autocorrect="off" value="${escHtml(initial)}">
+      ${preview.length ? `<div class="sheet-preview">${preview.map(i=>
+        `<div>${escHtml(DB.getExercise(i.exercise_id)?.name || '')} <span>· ${i.sets} set${i.sets!==1?'s':''}</span></div>`).join('')}</div>` : ''}
+      <div style="display:flex;gap:8px;margin-top:4px">
+        <button class="btn btn-secondary" id="name-sheet-cancel">Cancel</button>
+        <button class="btn btn-primary" id="name-sheet-save">${escHtml(confirmLabel)}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  requestAnimationFrame(()=>overlay.classList.add('visible'));
+  const input = overlay.querySelector('#name-sheet-input');
+  const save = () => {
+    const name = input.value.trim();
+    if (!name) { input.focus(); return; }
+    closeModal('name-sheet');
+    onSave(name);
+  };
+  overlay.querySelector('#name-sheet-save').addEventListener('click', save);
+  overlay.querySelector('#name-sheet-cancel').addEventListener('click', ()=>closeModal('name-sheet'));
+  input.addEventListener('keydown', e=>{ if (e.key==='Enter') save(); });
+  overlay.addEventListener('click', e=>{ if (e.target===overlay) closeModal('name-sheet'); });
+}
+
+function saveWorkoutAsTemplate(wid) {
+  if (!DB.templatesAvailable()) { showToast('Templates need a one-time database update — see Profile → Workout templates.', 6000); return; }
+  const exercises = templateItemsFromWorkout(wid);
+  if (!exercises.length) { showToast('Add an exercise first.'); return; }
+  showNameSheet({ title:'Save as Template', preview:exercises, onSave:name=>{
+    const dup = DB.getTemplates().find(t=>t.name.trim().toLowerCase() === name.toLowerCase());
+    const write = () => { DB.saveTemplate({ id:dup?.id || uuid(), name, exercises }); showToast(`Template “${name}” saved.`); };
+    if (dup) showConfirm('Replace Template', `You already have “${dup.name}”. Replace its exercises?`, write, { confirmLabel:'Replace', danger:false });
+    else write();
+  }});
+}
+
+function updateTemplateItems(tid, fn) {
+  const t = DB.getTemplate(tid);
+  if (!t) return;
+  const items = (t.exercises || []).map(i=>({ ...i }));
+  fn(items);
+  DB.saveTemplate({ id:tid, exercises:items });
+  Router.route();
+}
+
+function renderTemplatesSetup() {
+  return `
+    <div class="setup-card">
+      <h2>One-time setup</h2>
+      <p>Templates are saved to your account, which needs one new table in Supabase.</p>
+      <ol>
+        <li>Tap <strong>Copy SQL</strong>.</li>
+        <li>In Supabase, open <strong>SQL Editor</strong>, paste it and press <strong>Run</strong>.</li>
+        <li>Come back and tap <strong>Check again</strong>.</li>
+      </ol>
+      <p class="settings-hint">It's the file <code>supabase/003_templates.sql</code> in the project. Safe to run more than once.</p>
+      <button class="btn btn-primary" data-action="copy-template-sql">Copy SQL</button>
+      <button class="btn btn-secondary" data-action="recheck-templates">Check again</button>
+    </div>`;
+}
+
+function renderTemplates() {
+  const ok = DB.templatesAvailable();
+  const tpls = ok ? DB.getTemplates() : [];
+  const cards = tpls.map(t=>`
+    <div class="history-card template-card" data-action="open-template" data-tid="${t.id}">
+      <div class="template-card-main">
+        <div class="history-card-date">${escHtml(t.name)}</div>
+        <div class="template-card-sub">${escHtml(templateSummary(t))}</div>
+      </div>
+      <button class="btn-small" data-action="start-template" data-tid="${t.id}" ${validItems(t).length ? '' : 'disabled'}>Start</button>
+    </div>`).join('');
+
+  return `
+    <div class="screen">
+      <div class="page-header">
+        <div class="header-left">
+          <h1>Templates</h1>
+          <div class="header-sub">${ok ? `${tpls.length} saved` : 'Setup needed'}</div>
+        </div>
+        <div class="header-right">
+          ${ok ? `<button class="btn-small" data-action="tpl-new">+ New</button>` : ''}
+          <button class="btn-ghost" data-action="templates-back">Back</button>
+        </div>
+      </div>
+      <div class="scroll-content">
+        ${!ok ? renderTemplatesSetup()
+          : tpls.length ? cards
+          : `<div class="empty-state" style="padding-top:48px"><p>No templates yet.<br>Save a workout as a template, or tap <strong>+ New</strong>.</p></div>`}
+      </div>
+    </div>`;
+}
+
+function renderTemplateEditor(tid) {
+  const t = DB.templatesAvailable() && DB.getTemplate(tid);
+  if (!t) { Router.navigate('/templates'); return '<div></div>'; }
+  const items = t.exercises || [];
+  const valid = validItems(t).length;
+  const up = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="18 15 12 9 6 15"/></svg>`;
+  const x  = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+  const rows = items.map((it, i)=>{
+    const ex = DB.getExercise(it.exercise_id);
+    return `
+      <div class="tpl-item">
+        ${ex ? `<span class="exercise-dot ${ex.type}"></span>` : ''}
+        <div class="tpl-item-name">${ex ? escHtml(ex.name) : '<em>Deleted exercise</em>'}</div>
+        <div class="stepper">
+          <button data-action="tpl-sets" data-tid="${tid}" data-i="${i}" data-delta="-1" aria-label="Fewer sets">−</button>
+          <span>${clampSets(it.sets)} set${clampSets(it.sets)!==1?'s':''}</span>
+          <button data-action="tpl-sets" data-tid="${tid}" data-i="${i}" data-delta="1" aria-label="More sets">+</button>
+        </div>
+        <button class="btn-icon" data-action="tpl-move" data-tid="${tid}" data-i="${i}" aria-label="Move up" ${i ? '' : 'disabled'}>${up}</button>
+        <button class="btn-icon" data-action="tpl-remove" data-tid="${tid}" data-i="${i}" aria-label="Remove">${x}</button>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="screen">
+      <div class="page-header">
+        <div class="header-left">
+          <h1>Edit Template</h1>
+          <div class="header-sub">${valid} exercise${valid!==1?'s':''}</div>
+        </div>
+        <div class="header-right"><button class="btn-ghost" data-action="tpl-back">Done</button></div>
+      </div>
+      <div class="scroll-content">
+        <input class="text-input" id="tpl-name" data-action="tpl-name" data-tid="${tid}" maxlength="40" placeholder="Template name" value="${escHtml(t.name)}" aria-label="Template name">
+        ${items.length ? `<div class="settings-card">${rows}</div>` : ''}
+        <button class="add-exercise-btn" data-action="tpl-add-exercise" data-tid="${tid}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Exercise
+        </button>
+        <button class="btn btn-primary" data-action="start-template" data-tid="${tid}" ${valid ? '' : 'disabled'}>Start Workout</button>
+        <button class="btn btn-danger" data-action="tpl-delete" data-tid="${tid}">Delete Template</button>
+      </div>
+    </div>`;
+}
 
 /* ── History ──────────────────────────────────────────────────── */
 function renderHistory() {
@@ -1220,6 +1464,7 @@ function renderHistoryDetail(workoutId) {
           <div class="stat3"><div class="stat3-val sm">${prs.count}</div><div class="stat3-label">PR${prs.count!==1?'s':''} 🏆</div></div>
         </div>
         ${cards}
+        <button class="btn btn-secondary" data-action="save-template" data-wid="${workoutId}" style="margin-top:8px">Save as Template</button>
         <button class="btn btn-danger" data-action="delete-workout" data-id="${workoutId}" style="margin-top:8px">Delete Workout</button>
       </div>
     </div>`;
@@ -1855,7 +2100,11 @@ function renderSettings() {
               </div>
               <span class="settings-hint">Starts when you tick a set. iPhone can't play the alert while the app is in the background or on silent.</span>
             </div>
-            <!--templates-row-->
+            <div class="settings-row" data-action="open-templates" role="button">
+              <span class="settings-row-label">Workout templates</span>
+              <span class="settings-row-value">${DB.templatesAvailable() ? DB.getTemplates().length : 'Setup needed'}</span>
+              <div class="recent-chevron">${CHEVRON_SVG}</div>
+            </div>
           </div>
         </div>
 
@@ -2247,8 +2496,64 @@ function handleClick(e) {
     return;
   }
 
+  /* ── Templates ── */
+  if (action==='start-empty')    { closeModal('start-sheet'); openPicker(null, null); return; }
+  if (action==='start-template') { startFromTemplate(btn.dataset.tid); return; }
+  if (action==='save-template')  { saveWorkoutAsTemplate(btn.dataset.wid); return; }
+  if (action==='open-templates') {
+    closeModal('start-sheet');
+    if (!Router.current().startsWith('/templates')) templatesReturnTo = Router.current();
+    Router.navigate('/templates');
+    return;
+  }
+  if (action==='templates-back') { Router.navigate(templatesReturnTo); return; }
+  if (action==='open-template')  { Router.navigate(`/templates/${btn.dataset.tid}`); return; }
+  if (action==='tpl-back')       { Router.navigate('/templates'); return; }
+  if (action==='tpl-new') {
+    showNameSheet({ title:'New Template', confirmLabel:'Create', onSave:name=>{
+      const id = uuid();
+      DB.saveTemplate({ id, name, exercises:[] });
+      Router.navigate(`/templates/${id}`);
+    }});
+    return;
+  }
+  if (action==='tpl-add-exercise') { const tid = btn.dataset.tid; openPicker({ kind:'template', id:tid }, `/templates/${tid}`); return; }
+  if (action==='tpl-sets') {
+    const i = Number(btn.dataset.i), d = Number(btn.dataset.delta);
+    updateTemplateItems(btn.dataset.tid, items=>{ items[i].sets = clampSets(clampSets(items[i].sets) + d); });
+    return;
+  }
+  if (action==='tpl-move') {
+    const i = Number(btn.dataset.i);
+    if (i > 0) updateTemplateItems(btn.dataset.tid, items=>{ [items[i-1], items[i]] = [items[i], items[i-1]]; });
+    return;
+  }
+  if (action==='tpl-remove') { const i = Number(btn.dataset.i); updateTemplateItems(btn.dataset.tid, items=>{ items.splice(i, 1); }); return; }
+  if (action==='tpl-delete') {
+    const t = DB.getTemplate(btn.dataset.tid);
+    if (!t) return;
+    showConfirm('Delete Template', `Delete “${t.name}”? Your logged workouts aren't affected.`, ()=>{
+      DB.deleteTemplate(t.id); Router.navigate('/templates');
+    }, { confirmLabel:'Delete' });
+    return;
+  }
+  if (action==='copy-template-sql') {
+    navigator.clipboard?.writeText(TEMPLATES_SQL)
+      .then(()=>showToast('SQL copied — paste it into Supabase → SQL Editor and press Run.', 6000))
+      .catch(()=>showToast("Couldn't copy. The SQL is in supabase/003_templates.sql."));
+    return;
+  }
+  if (action==='recheck-templates') {
+    btn.disabled = true;
+    DB.recheckTemplates().then(ok=>{
+      showToast(ok ? 'Templates are ready.' : "Still not set up — run the SQL in Supabase, then try again.", 5000);
+      Router.route();
+    });
+    return;
+  }
+
   /* ── History ── */
-  if (action==='log-past')     { showPastWorkoutSheet(btn.dataset.date || localDate()); return; }
+  if (action==='log-past')     { closeModal('start-sheet'); showPastWorkoutSheet(btn.dataset.date || localDate()); return; }
   if (action==='past-cancel')  { closeModal('past-sheet'); return; }
   if (action==='past-save')    { savePastWorkout(); return; }
   if (action==='edit-workout') { Router.navigate(`/history/${btn.dataset.id}/edit`); return; }
@@ -2413,6 +2718,12 @@ function handleInput(e) {
     return;
   }
 
+  if (action==='tpl-name') {
+    const name = el.value.trim();
+    if (name) DB.saveTemplate({ id:el.dataset.tid, name });
+    return;
+  }
+
   if (action==='edit-meta') {
     const w = DB.getWorkout(el.dataset.wid);
     if (!w?.finished_at) return;
@@ -2483,12 +2794,24 @@ function openPicker(target = null, returnTo = null) {
   Router.navigate('/workout/new');
 }
 
-// Start a workout from scratch: the workout is created when the first
-// exercise is picked, so backing out leaves nothing behind.
-function openStart() { openPicker(null, null); }
+// Start a workout: with templates set up, offer them first. A workout from
+// scratch is created when the first exercise is picked, so backing out
+// leaves nothing behind.
+function openStart() {
+  if (DB.templatesAvailable()) showStartSheet();
+  else openPicker(null, null);
+}
 
 function pickerAdd(exId) {
   const t = pickerState.target;
+  if (t?.kind === 'template') {
+    const tpl = DB.getTemplate(t.id);
+    if (!tpl) { Router.navigate('/templates'); return; }
+    if ((tpl.exercises||[]).some(i=>i.exercise_id===exId)) { showToast('Already in this template.'); return; }
+    DB.saveTemplate({ id:tpl.id, exercises:[...(tpl.exercises||[]), { exercise_id:exId, sets:3 }] });
+    Router.navigate(pickerState.returnTo || `/templates/${tpl.id}`);
+    return;
+  }
   let wid = t?.kind === 'workout' ? t.id : DB.getActiveWorkout()?.id;
   if (wid && !DB.getWorkout(wid)) wid = null;
   if (!wid) {
