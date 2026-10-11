@@ -1715,3 +1715,45 @@ input { font-size: 16px; }
 .export-actions     { display: flex; flex-direction: column; gap: 8px; }
 .export-actions-row { display: flex; gap: 8px; }
 .export-actions-row .btn:disabled { opacity: 0.45; }
+
+/* ── Exercise history ──────────────────────────────────────────── */
+.library-item[data-action] { cursor: pointer; }
+.library-item[data-action]:active { background: var(--bg3); }
+.library-item .recent-chevron { margin-left: 0; }
+
+.page-header h1.ex-title { font-size: 26px; overflow-wrap: anywhere; line-height: 1.1; }
+.ex-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ex-stats.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.ex-stat {
+  background: var(--bg2);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
+  padding: 14px 16px;
+  min-width: 0;
+}
+.ex-stat-val {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.4px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ex-stat-val small { font-size: 12px; font-weight: 700; color: var(--fg3); margin-left: 3px; }
+.ex-stat-label { font-size: 12px; font-weight: 600; color: var(--fg3); margin-top: 2px; }
+
+.ex-session {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--bg3);
+  cursor: pointer;
+}
+.ex-session:last-child { border-bottom: none; }
+.ex-session:active { background: var(--bg3); }
+.ex-session-main { flex: 1; min-width: 0; }
+.ex-session-date { font-size: 15px; font-weight: 700; }
+.ex-session-sets { font-size: 13px; color: var(--fg3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ex-session-best { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }

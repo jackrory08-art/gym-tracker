@@ -7,7 +7,7 @@ import { MUSCLE_SLUGS, UPPER_SLUGS, LOWER_SLUGS, CORE_SLUGS, muscleLabel, slugMu
 import { renderBodySVG } from './body-map.js';
 import { buildExport } from './export.js';
 import { buildStatsIndex, previousPerformance, personalBests, sessionPRs, countedSets, hasValues,
-  workoutLiftedKg, workoutPRs, PR_LABELS } from './stats.js';
+  workoutLiftedKg, workoutPRs, exerciseHistory, PR_LABELS } from './stats.js';
 import { muscleHeat, heatColor, HEAT_ZERO, HEAT_STOPS, NON_MUSCLE_FILL, WINDOW_DAYS } from './heatmap.js';
 
 /* ═══════════════════════════════════════════════════════════════
@@ -181,6 +181,7 @@ const Router = {
     else if (path === '/history')        container.innerHTML = renderHistory();
     else if (Router.matchHistory(path))  container.innerHTML = renderHistoryDetail(Router.matchHistory(path));
     else if (path === '/library')        container.innerHTML = renderLibrary();
+    else if (Router.matchExercise(path)) { container.innerHTML = renderExerciseDetail(Router.matchExercise(path)); drawExerciseChart(); }
     else if (path === '/progress')       { container.innerHTML = renderProgress(); initHeatmapCarousel(); drawWeightChart(); }
     else if (path === '/export')         container.innerHTML = renderExport();
     else if (path === '/settings')       container.innerHTML = renderSettings();
@@ -991,6 +992,7 @@ function renderLibrary() {
   const exercises = DB.getExercises().slice().sort((a, b) => a.name.localeCompare(b.name));
   const regionOrder = ['upper','lower','core','full'];
   const trashSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>`;
+  const chevronSvg = CHEVRON_SVG;
 
   const sections = regionOrder.map(region=>{
     const regionExs = exercises.filter(e=>exerciseRegion(e)===region);
@@ -1012,13 +1014,14 @@ function renderLibrary() {
             const muscles = exerciseMuscles(e);
             const musclesStr = musclesText(e);
             return `
-            <div class="library-item">
+            <div class="library-item" data-action="open-exercise" data-exid="${e.id}">
               <span class="exercise-dot ${e.type}"></span>
               <div class="library-item-info">
                 <div class="library-item-name">${escHtml(e.name)}</div>
                 ${muscles.length>1 ? `<div class="library-item-sub">${musclesStr}</div>` : ''}
               </div>
               <button class="btn-icon" data-action="delete-exercise" data-exid="${e.id}" aria-label="Delete">${trashSvg}</button>
+              <div class="recent-chevron">${chevronSvg}</div>
             </div>`;
           }).join('')}
         </div>
@@ -1047,6 +1050,117 @@ function renderLibrary() {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       </button>
     </div>`;
+}
+
+/* ── Exercise history ─────────────────────────────────────────── */
+const CHEVRON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>`;
+let exerciseState = { returnTo:'/library', metric:null };
+let historyReturn = { id:null, to:'/history' };
+
+// Chart metrics per exercise type: value from a session summary, in display units.
+const round1 = v => Math.round(v * 10) / 10;
+const EX_METRICS = {
+  strength: [
+    { id:'e1rm',   label:'Est. 1RM', v:(m,s)=>m.e1rm   && round1(Number(weightDisplay(m.e1rm, s))),   tip:(v,s)=>`${v} ${s.weightUnit}` },
+    { id:'weight', label:'Heaviest', v:(m,s)=>m.weight && round1(Number(weightDisplay(m.weight, s))), tip:(v,s)=>`${v} ${s.weightUnit}` },
+    { id:'volume', label:'Volume',   v:(m,s)=>m.volume && Math.round(Number(weightDisplay(m.volume, s))), tip:(v,s)=>`${v.toLocaleString('en-GB')} ${s.weightUnit}` },
+  ],
+  bodyweight: [
+    { id:'reps',      label:'Best set',   v:m=>m.reps,      tip:v=>`${v} reps` },
+    { id:'totalReps', label:'Total reps', v:m=>m.totalReps, tip:v=>`${v} reps` },
+  ],
+  cardio: [
+    { id:'distance', label:'Distance', v:(m,s)=>m.distance && Number(distanceDisplay(m.distance, s)), tip:(v,s)=>`${v} ${s.distanceUnit}` },
+    { id:'duration', label:'Time',     v:m=>m.duration && round1(m.duration / 60), tip:v=>formatClock(Math.round(v * 60)) },
+  ],
+};
+const exMetric = ex => EX_METRICS[ex.type].find(m=>m.id===exerciseState.metric) || EX_METRICS[ex.type][0];
+
+function renderExerciseDetail(exId) {
+  const ex = DB.getExercise(exId);
+  if (!ex) { Router.navigate('/library'); return '<div></div>'; }
+  const settings = getSettings();
+  const { sessions, bests } = exerciseHistory(ex.id, statsIndex());
+  const muscles = musclesText(ex, 3);
+  const dash = v => v == null ? '—' : v;
+  const tile = (val, unit, label) => `<div class="ex-stat"><div class="ex-stat-val">${val}${unit && val!=='—' ? `<small>${unit}</small>` : ''}</div><div class="ex-stat-label">${label}</div></div>`;
+
+  let tiles;
+  if (ex.type === 'strength') {
+    const total = sessions.reduce((t, x) => t + (x.summary.volume || 0), 0);
+    tiles = [
+      tile(dash(bests.e1rm && round1(Number(weightDisplay(bests.e1rm, settings)))), settings.weightUnit, 'Best est. 1RM'),
+      tile(dash(bests.weight && weightDisplay(bests.weight, settings)), settings.weightUnit, 'Heaviest'),
+      tile(total > 0 ? formatLifted(total, settings, true) : '—', '', 'Total lifted'),
+      tile(sessions.length, '', `Session${sessions.length!==1?'s':''}`),
+    ];
+  } else if (ex.type === 'bodyweight') {
+    const total = sessions.reduce((t, x) => t + (x.summary.totalReps || 0), 0);
+    tiles = [tile(dash(bests.reps), 'reps', 'Best set'), tile(total || '—', '', 'Total reps'), tile(sessions.length, '', `Session${sessions.length!==1?'s':''}`)];
+  } else {
+    tiles = [
+      tile(dash(bests.distance && distanceDisplay(bests.distance, settings)), settings.distanceUnit, 'Longest distance'),
+      tile(bests.duration ? formatClock(bests.duration) : '—', '', 'Longest time'),
+      tile(sessions.length, '', `Session${sessions.length!==1?'s':''}`),
+    ];
+  }
+
+  const metric = exMetric(ex);
+  const chart = sessions.length ? `
+    <section class="heatmap-card weight-card">
+      <div class="heatmap-head"><h2>Progress</h2></div>
+      <div class="weight-ranges">${EX_METRICS[ex.type].map(m =>
+        `<button class="weight-range ${m.id===metric.id?'active':''}" data-action="exercise-metric" data-metric="${m.id}">${m.label}</button>`).join('')}
+      </div>
+      <div class="weight-chart" id="exercise-chart" data-exid="${ex.id}"></div>
+    </section>` : '';
+
+  const bestLabel = x => ex.type==='strength'
+    ? (x.summary.e1rm ? `1RM ${round1(Number(weightDisplay(x.summary.e1rm, settings)))}` : x.summary.weight ? `${weightDisplay(x.summary.weight, settings)} ${settings.weightUnit}` : '')
+    : ex.type==='bodyweight' ? (x.summary.reps ? `${x.summary.reps} reps` : '')
+    : (x.summary.distance ? `${distanceDisplay(x.summary.distance, settings)} ${settings.distanceUnit}` : x.summary.duration ? formatClock(x.summary.duration) : '');
+  const rows = sessions.map(x => {
+    const pr = x.prs.bySet.size || x.prs.session.length;
+    return `
+      <div class="ex-session" data-action="open-history-detail" data-id="${x.workout.id}" data-from="/exercise/${ex.id}">
+        <div class="ex-session-main">
+          <div class="ex-session-date">${formatDate(parseLocalDate(x.date))}${pr ? '<span class="pr-chip inline">PR</span>' : ''}</div>
+          <div class="ex-session-sets">${escHtml(setsSummary(x.sets, ex.type, settings, 8))}</div>
+        </div>
+        <div class="ex-session-best">${escHtml(bestLabel(x))}</div>
+        <div class="recent-chevron">${CHEVRON_SVG}</div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="screen">
+      <div class="page-header">
+        <div class="header-left">
+          <h1 class="ex-title">${escHtml(ex.name)}</h1>
+          <div class="header-sub">${categoryLabel(ex.type)}${muscles ? ` · ${muscles}` : ''}</div>
+        </div>
+        <div class="header-right"><button class="btn-ghost" data-action="exercise-back">Back</button></div>
+      </div>
+      <div class="scroll-content">
+        <div class="ex-stats ${tiles.length===3 ? 'cols-3' : ''}">${tiles.join('')}</div>
+        ${chart}
+        ${sessions.length
+          ? `<div class="settings-label">History</div><div class="library-card">${rows}</div>`
+          : `<div class="empty-state" style="padding:32px 0"><p>No sessions logged yet.</p></div>`}
+      </div>
+    </div>`;
+}
+
+function drawExerciseChart() {
+  const wrap = document.getElementById('exercise-chart');
+  const ex   = wrap && DB.getExercise(wrap.dataset.exid);
+  if (!ex) return;
+  const settings = getSettings(), metric = exMetric(ex);
+  const pts = exerciseHistory(ex.id, statsIndex()).sessions.slice().reverse()
+    .map(x => ({ t:parseLocalDate(x.date).getTime(), v:metric.v(x.summary, settings) }))
+    .filter(p => p.v > 0);
+  if (!pts.length) { wrap.innerHTML = `<div class="chart-empty">No ${metric.label.toLowerCase()} data yet.</div>`; return; }
+  drawLineChart(wrap, pts, { label:`${ex.name} ${metric.label}`, tip:v => metric.tip(v, settings) });
 }
 
 /* ── Progress ─────────────────────────────────────────────────── */
@@ -1218,7 +1332,6 @@ function saveWeight() {
   showToast(sameDate ? 'Weigh-in updated.' : 'Weigh-in saved.');
 }
 
-// Single-series line chart sized to its container; crosshair tooltip on hover/touch/keys.
 function drawWeightChart() {
   const wrap = document.getElementById('weight-chart');
   if (!wrap) return;
@@ -1228,20 +1341,33 @@ function drawWeightChart() {
     wrap.innerHTML = `<div class="chart-empty">${DB.getBodyWeightLogs().length ? 'No weigh-ins in this range.' : 'Log your first weigh-in below to start the chart.'}</div>`;
     return;
   }
+  drawLineChart(wrap, points.map(p => ({ t:parseLocalDate(p.date).getTime(), v:Number(weightDisplay(p.kg, settings)) })),
+    { from:parseLocalDate(from).getTime(), label:'Body weight', tip:v => `${v} ${settings.weightUnit}` });
+}
 
+// 1/2/2.5/5 × 10^n giving at most 4 intervals.
+function niceStep(range) {
+  const p = 10 ** Math.floor(Math.log10(range / 4));
+  return [1, 2, 2.5, 5, 10].map(f => f * p).find(st => range / st <= 4);
+}
+
+// Single-series line chart sized to its container; crosshair tooltip on hover/touch/keys.
+// pts: [{ t:ms, v }] oldest first. opts: { from?, label, tip(v), minSpan? }
+function drawLineChart(wrap, pts, { from, label, tip, minSpan = 2 }) {
   const W = wrap.clientWidth || 320, H = 200;
-  const m = { top:14, right:48, bottom:26, left:40 };
-  const pts = points.map(p => ({ ...p, t:parseLocalDate(p.date).getTime(), v:Number(weightDisplay(p.kg, settings)) }));
-  const t0 = parseLocalDate(from).getTime();
+  const t0 = from ?? pts[0].t;
   const t1 = Math.max(parseLocalDate(localDate()).getTime(), pts[pts.length-1].t);
 
   // Clean y ticks around the data.
-  let lo = Math.min(...pts.map(p => p.v)), hi = Math.max(...pts.map(p => p.v));
-  if (hi - lo < 2) { const mid = (hi + lo) / 2; lo = mid - 1; hi = mid + 1; }
-  const step = [0.5, 1, 2, 2.5, 5, 10, 20, 50].find(s => (hi - lo) / s <= 4) || 100;
+  const vMin = Math.min(...pts.map(p => p.v)), vMax = Math.max(...pts.map(p => p.v));
+  let lo = vMin, hi = vMax;
+  if (hi - lo < minSpan) { const mid = (hi + lo) / 2; lo = mid - minSpan / 2; hi = mid + minSpan / 2; }
+  if (vMin >= 0 && lo < 0) { hi -= lo; lo = 0; }
+  const step = niceStep(hi - lo);
   lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
   const ticks = [];
-  for (let v = lo; v <= hi + 1e-9; v += step) ticks.push(Math.round(v * 10) / 10);
+  for (let v = lo; v <= hi + 1e-9; v += step) ticks.push(Math.round(v * 100) / 100);
+  const m = { top:14, right:48, bottom:26, left:Math.max(40, 12 + 7 * Math.max(...ticks.map(v => String(v).length))) };
 
   const x = t => t1 === t0 ? (m.left + W - m.right) / 2 : m.left + (t - t0) / (t1 - t0) * (W - m.left - m.right);
   const y = v => m.top + (hi - v) / (hi - lo) * (H - m.top - m.bottom);
@@ -1252,7 +1378,7 @@ function drawWeightChart() {
 
   wrap.innerHTML = `
     <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" tabindex="0" role="img"
-      aria-label="Body weight, ${pts.length} weigh-ins, latest ${last.v} ${settings.weightUnit}. Use arrow keys to step through values.">
+      aria-label="${escHtml(label)}, ${pts.length} points, latest ${escHtml(tip(last.v))}. Use arrow keys to step through values.">
       <g class="chart-grid">${ticks.map(v => `<line x1="${m.left}" x2="${W - m.right}" y1="${y(v)}" y2="${y(v)}"/>`).join('')}</g>
       <g class="chart-axis">${ticks.map(v => `<text x="${m.left - 8}" y="${y(v) + 4}" text-anchor="end">${v}</text>`).join('')}${xLabels}</g>
       ${pts.length > 1 ? `<path class="chart-area" d="${line}L${x(last.t)},${base}L${x(pts[0].t)},${base}Z"/>
@@ -1265,7 +1391,7 @@ function drawWeightChart() {
     </svg>
     <div class="chart-tooltip" hidden><strong></strong><span></span></div>`;
 
-  const svg = wrap.querySelector('svg'), tip = wrap.querySelector('.chart-tooltip');
+  const svg = wrap.querySelector('svg'), tipEl = wrap.querySelector('.chart-tooltip');
   const cross = svg.querySelector('.chart-crosshair'), dot = svg.querySelector('.chart-hover-dot');
   let current = pts.length - 1;
   const show = i => {
@@ -1273,14 +1399,14 @@ function drawWeightChart() {
     const p = pts[i], px = x(p.t), py = y(p.v);
     cross.setAttribute('x1', px); cross.setAttribute('x2', px); cross.setAttribute('visibility', 'visible');
     dot.setAttribute('cx', px); dot.setAttribute('cy', py); dot.setAttribute('visibility', 'visible');
-    tip.querySelector('strong').textContent = `${p.v} ${settings.weightUnit}`;
-    tip.querySelector('span').textContent = formatDate(parseLocalDate(p.date));
-    tip.hidden = false;
-    const left = Math.min(Math.max(px - tip.offsetWidth / 2, 0), W - tip.offsetWidth);
-    tip.style.left = `${left}px`;
-    tip.style.top  = `${Math.max(py - tip.offsetHeight - 12, 0)}px`;
+    tipEl.querySelector('strong').textContent = tip(p.v);
+    tipEl.querySelector('span').textContent = formatDate(new Date(p.t));
+    tipEl.hidden = false;
+    const left = Math.min(Math.max(px - tipEl.offsetWidth / 2, 0), W - tipEl.offsetWidth);
+    tipEl.style.left = `${left}px`;
+    tipEl.style.top  = `${Math.max(py - tipEl.offsetHeight - 12, 0)}px`;
   };
-  const hide = () => { cross.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden'); tip.hidden = true; };
+  const hide = () => { cross.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden'); tipEl.hidden = true; };
   const nearest = clientX => {
     const px = clientX - svg.getBoundingClientRect().left;
     let best = 0;
@@ -1298,10 +1424,10 @@ function drawWeightChart() {
   });
 }
 
-let weightChartResize = null;
+let chartResize = null;
 window.addEventListener('resize', () => {
-  clearTimeout(weightChartResize);
-  weightChartResize = setTimeout(drawWeightChart, 150);
+  clearTimeout(chartResize);
+  chartResize = setTimeout(() => { drawWeightChart(); drawExerciseChart(); }, 150);
 });
 
 /* ── Export for AI ────────────────────────────────────────────── */
@@ -1680,7 +1806,24 @@ function handleClick(e) {
     el?.scrollTo({ left: Number(btn.dataset.index) * el.clientWidth, behavior:'smooth' });
     return;
   }
-  if (action==='open-history-detail') { Router.navigate(`/history/${btn.dataset.id}`); return; }
+  if (action==='open-history-detail') {
+    historyReturn = { id:btn.dataset.id, to:btn.dataset.from || '/history' };
+    Router.navigate(`/history/${btn.dataset.id}`);
+    return;
+  }
+  if (action==='open-exercise') {
+    if (!Router.current().startsWith('/exercise/')) exerciseState.returnTo = Router.current();
+    exerciseState.metric = null;
+    Router.navigate(`/exercise/${btn.dataset.exid}`);
+    return;
+  }
+  if (action==='exercise-back') { Router.navigate(exerciseState.returnTo); return; }
+  if (action==='exercise-metric') {
+    exerciseState.metric = btn.dataset.metric;
+    document.querySelectorAll('[data-action="exercise-metric"]').forEach(b=>b.classList.toggle('active', b===btn));
+    drawExerciseChart();
+    return;
+  }
 
   /* ── Target Muscle Selector ── */
   if (action==='open-target') {
@@ -1837,7 +1980,10 @@ function handleClick(e) {
   }
 
   /* ── History ── */
-  if (action==='back-history') { Router.navigate('/history'); return; }
+  if (action==='back-history') {
+    Router.navigate(historyReturn.id === Router.matchHistory(Router.current()) ? historyReturn.to : '/history');
+    return;
+  }
   if (action==='delete-workout') {
     showConfirm('Delete Workout', 'Permanently delete this workout log?', ()=>{
       DB.deleteWorkout(btn.dataset.id); Router.navigate('/history');
