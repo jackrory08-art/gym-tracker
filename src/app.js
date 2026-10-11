@@ -6,6 +6,8 @@ import { detectLocalLegacyData, isLegacyBackup, runLegacyImport, legacyImportDon
 import { MUSCLE_SLUGS, UPPER_SLUGS, LOWER_SLUGS, CORE_SLUGS, muscleLabel, slugMuscles, hasOnlySlugs } from './muscles.js';
 import { renderBodySVG } from './body-map.js';
 import { buildExport } from './export.js';
+import { buildStatsIndex, previousPerformance, personalBests, sessionPRs, countedSets, hasValues,
+  workoutLiftedKg, workoutPRs, PR_LABELS } from './stats.js';
 import { muscleHeat, heatColor, HEAT_ZERO, HEAT_STOPS, NON_MUSCLE_FILL, WINDOW_DAYS } from './heatmap.js';
 
 /* ═══════════════════════════════════════════════════════════════
@@ -380,6 +382,7 @@ function renderHome() {
   const totalSets = DB.getSets().filter(s => weekIds.has(s.workout_id)).length;
 
   const recent = workouts.slice().sort((a, b) => workoutTime(b) - workoutTime(a)).slice(0, 4);
+  const settings = getSettings(), idx = statsIndex();
 
   const dumbbellSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6.5 6.5h11M6.5 17.5h11M2 12h2m16 0h2M4 10v4M20 10v4"/></svg>`;
   const chevronSvg  = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>`;
@@ -397,7 +400,7 @@ function renderHome() {
           <div class="recent-icon">${dumbbellSvg}</div>
           <div class="recent-info">
             <div class="recent-name">${escHtml(label)}</div>
-            <div class="recent-date">${dateStr}</div>
+            <div class="recent-date">${dateStr}${idx.liftedByWorkout.get(w.id) > 0 ? ` · ${formatLifted(idx.liftedByWorkout.get(w.id), settings, true)}` : ''}</div>
           </div>
           <div class="recent-stats">
             <div class="recent-dur">${workoutDuration(w)}</div>
@@ -654,6 +657,7 @@ function renderActiveWorkout() {
 
 // One editor for the active workout and for finished (past) workouts.
 function renderWorkoutEditor(workout) {
+  editorCtx = null;
   const groups   = groupSets(DB.getSetsForWorkout(workout.id));
   const settings = getSettings();
 
@@ -665,10 +669,11 @@ function renderWorkoutEditor(workout) {
   return `
     <div class="screen">
       <div class="workout-header-sticky">
-        <div>
+        <div class="workout-header-main">
           <div class="workout-title">Active Workout</div>
           <div id="workout-timer" class="workout-timer">${formatElapsed(workout.started_at)}</div>
         </div>
+        ${renderLiftedBadge(workout, settings)}
         <button class="btn btn-ghost-danger btn-sm" data-action="discard-workout">Discard</button>
       </div>
       <div id="exercise-cards">${cards}</div>
@@ -682,29 +687,35 @@ function renderWorkoutEditor(workout) {
     </div>`;
 }
 
-function renderExerciseCard(group, ex, settings, workout, ctx = {}) {
+function renderExerciseCard(group, ex, settings, workout) {
   const headerCols = ex.type==='strength'
-    ? '<span>#</span><span>Weight</span><span></span><span>Reps</span><span>✓</span>'
-    : ex.type==='bodyweight' ? '<span>#</span><span>Reps</span><span>✓</span>'
+    ? `<span>#</span><span>Previous</span><span>${settings.weightUnit}</span><span>Reps</span><span>✓</span>`
+    : ex.type==='bodyweight' ? '<span>#</span><span>Previous</span><span>Reps</span><span>✓</span>'
     : `<span>#</span><span>Time</span><span>${settings.distanceUnit}</span><span>Cal</span><span>Gain</span><span>✓</span>`;
   const muscles = musclesText(ex, 3);
+  const { prev } = exerciseCtx(workout, ex.id);
+  const ctx = { prev, prs:cardPRs(workout, ex).bySet };
+  const last = prev ? `
+      <button class="exercise-last" data-action="open-exercise" data-exid="${ex.id}">
+        Last time · <strong>${lastDate(prev.workout.date)}</strong>: ${escHtml(setsSummary(prev.sets, ex.type, settings))}
+      </button>` : '';
 
   return `
     <div class="exercise-card" data-exid="${ex.id}">
       <div class="exercise-card-header">
         <div style="flex:1;min-width:0">
-          <div class="exercise-card-name">${escHtml(ex.name)}</div>
+          <button class="exercise-card-name link-btn" data-action="open-exercise" data-exid="${ex.id}">${escHtml(ex.name)}</button>
           ${muscles ? `<div style="font-size:12px;color:var(--fg3);margin-top:2px">${muscles}</div>` : ''}
         </div>
         <span class="exercise-card-badge badge-${ex.type}">${categoryLabel(ex.type)}</span>
         <button class="btn-icon" data-action="remove-exercise" data-wid="${workout.id}" data-exid="${ex.id}" aria-label="Remove">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
-      </div>
+      </div>${last}
       <div class="sets-table">
         <div class="set-row-header type-${ex.type}">${headerCols}</div>
         <div class="set-rows" data-exid="${ex.id}">
-          ${group.sets.map((s,i)=>renderSetRow(s,i,ex.type,settings)).join('')}
+          ${group.sets.map((s,i)=>renderSetRow(s,i,ex.type,settings,ctx)).join('')}
         </div>
       </div>
       <button class="add-set-btn" data-action="add-set" data-wid="${workout.id}" data-exid="${ex.id}">
@@ -714,9 +725,17 @@ function renderExerciseCard(group, ex, settings, workout, ctx = {}) {
     </div>`;
 }
 
-function renderSetRow(set, idx, type, settings) {
-  const done  = set.completed ? 'done' : '';
-  const rowCls = set.completed ? 'completed' : '';
+// ctx = { prev: last session of this exercise, prs: Map(setId → PR kinds) }
+function renderSetRow(set, idx, type, settings, ctx = {}) {
+  const p      = ctx.prev?.sets[idx] || null;
+  const kinds  = ctx.prs?.get(set.id);
+  const done   = set.completed ? 'done' : '';
+  const rowCls = `${set.completed ? 'completed' : ''} ${kinds ? 'is-pr' : ''}`;
+  const num    = `<span class="set-num"><span class="set-idx">${idx+1}</span><span class="pr-chip" title="${kinds ? prTitle(kinds) : ''}">PR</span></span>`;
+  const prevTxt = p ? setSummary(p, type, settings) : '';
+  const prevBtn = p
+    ? `<button class="set-prev" data-action="fill-prev" data-setid="${set.id}" aria-label="Use last time: ${escHtml(prevTxt)}">${escHtml(prevTxt)}</button>`
+    : `<button class="set-prev" disabled aria-label="No previous set">—</button>`;
   const check = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>`;
   const input = (field, value, placeholder, mode='decimal', inputType='number') =>
     `<input class="set-input" type="${inputType}" inputmode="${mode}" placeholder="${placeholder}" value="${escHtml(value)}" data-action="set-field" data-setid="${set.id}" data-field="${field}"${inputType==='number'?' min="0"':' pattern="[0-9]*" autocomplete="off"'}>`;
@@ -724,28 +743,126 @@ function renderSetRow(set, idx, type, settings) {
 
   if (type==='strength') {
     return `<div class="set-row type-strength ${rowCls}" data-setid="${set.id}">
-      <span class="set-num">${idx+1}</span>
-      ${input('weight', weightDisplay(set.weight_kg, settings), '0')}
-      <span class="set-sep">${settings.weightUnit}</span>
-      ${input('reps', set.reps ?? '', '0', 'numeric')}
+      ${num}${prevBtn}
+      ${input('weight', weightDisplay(set.weight_kg, settings), p?.weight_kg != null ? weightDisplay(p.weight_kg, settings) : '0')}
+      ${input('reps', set.reps ?? '', p?.reps ?? '0', 'numeric')}
       ${checkBtn}
     </div>`;
   }
   if (type==='bodyweight') {
     return `<div class="set-row type-bodyweight ${rowCls}" data-setid="${set.id}">
-      <span class="set-num">${idx+1}</span>
-      ${input('reps', set.reps ?? '', '0', 'numeric')}
+      ${num}${prevBtn}
+      ${input('reps', set.reps ?? '', p?.reps ?? '0', 'numeric')}
       ${checkBtn}
     </div>`;
   }
   return `<div class="set-row type-cardio ${rowCls}" data-setid="${set.id}">
-    <span class="set-num">${idx+1}</span>
-    ${input('duration', set.duration_s ? formatClock(set.duration_s) : '', '0:00', 'numeric', 'text')}
-    ${input('distance', distanceDisplay(set.distance_m, settings), settings.distanceUnit)}
-    ${input('calories', set.calories ?? '', 'cal', 'numeric')}
-    ${input('elevation', set.elevation_gain_m ?? '', 'm', 'numeric')}
+    ${num}
+    ${input('duration', set.duration_s ? formatClock(set.duration_s) : '', p?.duration_s ? formatClock(p.duration_s) : '0:00', 'numeric', 'text')}
+    ${input('distance', distanceDisplay(set.distance_m, settings), p?.distance_m != null ? distanceDisplay(p.distance_m, settings) : settings.distanceUnit)}
+    ${input('calories', set.calories ?? '', p?.calories ?? 'cal', 'numeric')}
+    ${input('elevation', set.elevation_gain_m ?? '', p?.elevation_gain_m ?? 'm', 'numeric')}
     ${checkBtn}
   </div>`;
+}
+
+/* ── Last time / PRs / lifted (editor) ── */
+// Per editor render: each exercise's previous session and bests before this
+// workout. Typing never touches these, so they're cached; the key resets them
+// if the workout's date or start time changes.
+let editorCtx = null;
+function exerciseCtx(workout, exId) {
+  const key = `${workout.date}|${workout.started_at}`;
+  if (editorCtx?.wid !== workout.id || editorCtx.key !== key) editorCtx = { wid:workout.id, key, byEx:new Map() };
+  let c = editorCtx.byEx.get(exId);
+  if (!c) {
+    const idx = statsIndex();
+    c = { prev:previousPerformance(exId, workout, idx), bests:personalBests(exId, workout, idx) };
+    editorCtx.byEx.set(exId, c);
+  }
+  return c;
+}
+
+function cardPRs(workout, ex) {
+  const sets = DB.getSetsForWorkout(workout.id).filter(s=>s.exercise_id===ex.id);
+  return sessionPRs(countedSets(sets, ex.type), ex.type, exerciseCtx(workout, ex.id).bests);
+}
+
+const exByIdMap = () => new Map(DB.getExercises().map(e=>[e.id, e]));
+const prTitle   = kinds => 'Personal record: ' + kinds.map(k=>PR_LABELS[k]).join(', ');
+
+function liftedText(kg, settings, compact = true) { return kg > 0 ? formatLifted(kg, settings, compact) : '—'; }
+
+function renderLiftedBadge(workout, settings) {
+  const kg = workoutLiftedKg(DB.getSetsForWorkout(workout.id), exByIdMap());
+  return `<div class="workout-lifted"><span id="workout-lifted">${liftedText(kg, settings)}</span><small>lifted</small></div>`;
+}
+
+const pickMetrics = (src, type) =>
+  type==='strength'   ? { weight_kg:src.weight_kg ?? null, reps:src.reps ?? null }
+: type==='bodyweight' ? { reps:src.reps ?? null }
+: { duration_s:src.duration_s ?? null, distance_m:src.distance_m ?? null, calories:src.calories ?? null, elevation_gain_m:src.elevation_gain_m ?? null };
+
+// '60×8' / '60 kg' / '×8'; bodyweight '12'; cardio '25:30 · 5 km'
+function setSummary(s, type, settings) {
+  if (type==='strength') {
+    const w = s.weight_kg != null ? weightDisplay(s.weight_kg, settings) : '', r = s.reps ?? '';
+    return w && r !== '' ? `${w}×${r}` : w ? `${w} ${settings.weightUnit}` : r !== '' ? `×${r}` : '';
+  }
+  if (type==='bodyweight') return s.reps != null ? String(s.reps) : '';
+  return [s.duration_s ? formatClock(s.duration_s) : '', s.distance_m != null ? `${distanceDisplay(s.distance_m, settings)} ${settings.distanceUnit}` : '']
+    .filter(Boolean).join(' · ');
+}
+
+function setsSummary(sets, type, settings, max = 4) {
+  const parts = sets.map(s=>setSummary(s, type, settings)).filter(Boolean);
+  const more  = parts.length - max;
+  return parts.slice(0, max).join(', ') + (more > 0 ? ` +${more}` : '') + (type==='bodyweight' && parts.length ? ' reps' : '');
+}
+
+const lastDate = ymd => {
+  const d = parseLocalDate(ymd);
+  return d.toLocaleDateString('en-GB', { day:'numeric', month:'short', ...(d.getFullYear()!==new Date().getFullYear() && { year:'numeric' }) });
+};
+
+function setRowContext(setId) {
+  const set = DB.getSets().find(s=>s.id===setId);
+  const workout = set && DB.getWorkout(set.workout_id), ex = set && DB.getExercise(set.exercise_id);
+  if (!workout || !ex) return null;
+  const idx = DB.getSetsForWorkout(workout.id).filter(s=>s.exercise_id===ex.id).findIndex(s=>s.id===setId);
+  const { prev } = exerciseCtx(workout, ex.id);
+  return { set, workout, ex, idx, prev, prevSet:prev?.sets[idx] || null };
+}
+
+function rerenderSetRow(c) {
+  const row = document.querySelector(`.set-row[data-setid="${c.set.id}"]`);
+  if (row) row.outerHTML = renderSetRow(c.set, c.idx, c.ex.type, getSettings(), { prev:c.prev, prs:cardPRs(c.workout, c.ex).bySet });
+}
+
+function fillSetFromPrev(setId) {
+  const c = setRowContext(setId);
+  if (!c?.prevSet) return;
+  DB.saveSets([{ id:setId, ...pickMetrics(c.prevSet, c.ex.type) }]);
+  rerenderSetRow(c);
+  refreshExerciseLive(c.workout.id, c.ex.id);
+}
+
+// Patch PR chips (one card) and the lifted total without re-rendering inputs.
+function refreshExerciseLive(wid, exId) {
+  const workout = DB.getWorkout(wid);
+  if (!workout) return;
+  const ex = exId && DB.getExercise(exId);
+  if (ex) {
+    const prs = cardPRs(workout, ex).bySet;
+    document.querySelectorAll(`.set-rows[data-exid="${ex.id}"] .set-row`).forEach(row=>{
+      const kinds = prs.get(row.dataset.setid);
+      row.classList.toggle('is-pr', !!kinds);
+      const chip = row.querySelector('.pr-chip');
+      if (chip) chip.title = kinds ? prTitle(kinds) : '';
+    });
+  }
+  const el = document.getElementById('workout-lifted');
+  if (el) el.textContent = liftedText(workoutLiftedKg(DB.getSetsForWorkout(wid), exByIdMap()), getSettings());
 }
 
 function renderRest() {}
@@ -754,6 +871,7 @@ function renderRest() {}
 function renderHistory() {
   const workouts = DB.getWorkouts().filter(w=>w.finished_at).sort((a,b)=>workoutTime(b)-workoutTime(a));
   const exMap    = Object.fromEntries(DB.getExercises().map(e=>[e.id,e]));
+  const settings = getSettings(), idx = statsIndex();
 
   const cards = workouts.length===0
     ? `<div class="empty-state" style="padding-top:64px">
@@ -761,8 +879,9 @@ function renderHistory() {
          <p>No workouts logged yet.</p>
        </div>`
     : workouts.map(w=>{
-        const sets    = DB.getSetsForWorkout(w.id);
+        const sets    = idx.setsByWorkout.get(w.id) || [];
         const groups  = groupSets(sets);
+        const lifted  = idx.liftedByWorkout.get(w.id) || 0;
         const exs     = groups.map(g=>exMap[g.exerciseId]).filter(Boolean);
         const names   = exs.map(e=>e.name);
         const regions = [...new Set(exs.map(exerciseRegion))];
@@ -779,8 +898,9 @@ function renderHistory() {
             ${regionPills ? `<div class="region-pills">${regionPills}</div>` : ''}
             <div class="history-card-exercises">${escHtml(names.join(', '))||'No exercises'}</div>
             <div class="history-card-stats">
-              <div class="history-stat"><strong>${groups.length}</strong> exercises</div>
-              <div class="history-stat"><strong>${sets.length}</strong> sets</div>
+              <div class="history-stat"><strong>${groups.length}</strong> exercise${groups.length!==1?'s':''}</div>
+              <div class="history-stat"><strong>${sets.length}</strong> set${sets.length!==1?'s':''}</div>
+              ${lifted > 0 ? `<div class="history-stat"><strong>${formatLifted(lifted, settings)}</strong> lifted</div>` : ''}
             </div>
           </div>`;
       }).join('');
@@ -803,13 +923,18 @@ function renderHistoryDetail(workoutId) {
   const workout = DB.getWorkout(workoutId);
   if (!workout) { Router.navigate('/history'); return '<div></div>'; }
 
-  const groups   = groupSets(DB.getSetsForWorkout(workoutId));
+  const sets     = DB.getSetsForWorkout(workoutId);
+  const groups   = groupSets(sets);
   const settings = getSettings();
+  const idx      = statsIndex();
+  const prs      = workoutPRs(workout, sets, idx);
+  const lifted   = idx.liftedByWorkout.get(workoutId) || 0;
 
   const cards = groups.map(g=>{
     const ex = DB.getExercise(g.exerciseId);
     if (!ex) return '';
-    const rows    = g.sets.map((s,i)=>renderDetailSetRow(s,i,ex.type,settings)).join('');
+    const rows    = g.sets.map((s,i)=>renderDetailSetRow(s,i,ex.type,settings,prs.bySet.get(s.id))).join('');
+    const sessionPR = (prs.session.get(ex.id) || []).map(k=>`<span class="pr-chip inline" title="${prTitle([k])}">${escHtml(PR_LABELS[k].replace(/^Most /,''))} PR</span>`).join('');
     const headers = ex.type==='strength'
       ? '<th>#</th><th>Weight</th><th>Reps</th>'
       : ex.type==='bodyweight' ? '<th>#</th><th>Reps</th>'
@@ -819,7 +944,7 @@ function renderHistoryDetail(workoutId) {
       <div class="detail-exercise">
         <div class="detail-exercise-name">
           <span class="exercise-dot ${ex.type}"></span>
-          ${escHtml(ex.name)}
+          <button class="link-btn" data-action="open-exercise" data-exid="${ex.id}">${escHtml(ex.name)}</button>${sessionPR}
           ${muscles ? `<span style="font-size:12px;color:var(--fg3);font-weight:400;margin-left:4px">${muscles}</span>` : ''}
           <span class="exercise-card-badge badge-${ex.type}" style="margin-left:auto">${categoryLabel(ex.type)}</span>
         </div>
@@ -832,27 +957,33 @@ function renderHistoryDetail(workoutId) {
       <div class="page-header">
         <div class="header-left">
           <h1>${formatDate(parseLocalDate(workout.date))}</h1>
-          <div class="header-sub">${workoutDuration(workout)} · ${groups.length} exercise${groups.length!==1?'s':''}</div>
+          <div class="header-sub">${groups.length} exercise${groups.length!==1?'s':''} · ${sets.length} set${sets.length!==1?'s':''}</div>
         </div>
         <div class="header-right">
           <button class="btn-ghost" data-action="back-history">Back</button>
         </div>
       </div>
       <div class="scroll-content">
+        <div class="stats-3">
+          <div class="stat3"><div class="stat3-val sm">${workoutDuration(workout)}</div><div class="stat3-label">Duration</div></div>
+          <div class="stat3"><div class="stat3-val sm">${liftedText(lifted, settings)}</div><div class="stat3-label">Lifted</div></div>
+          <div class="stat3"><div class="stat3-val sm">${prs.count}</div><div class="stat3-label">PR${prs.count!==1?'s':''} 🏆</div></div>
+        </div>
         ${cards}
         <button class="btn btn-danger" data-action="delete-workout" data-id="${workoutId}" style="margin-top:8px">Delete Workout</button>
       </div>
     </div>`;
 }
 
-function renderDetailSetRow(set, idx, type, settings) {
+function renderDetailSetRow(set, idx, type, settings, prKinds) {
   const or = (v, suffix='') => v==='' || v==null ? '—' : `${v}${suffix}`;
+  const n  = `${idx+1}${prKinds ? ` <span class="pr-chip inline" title="${prTitle(prKinds)}">PR</span>` : ''}`;
   if (type==='strength') {
-    return `<tr><td>${idx+1}</td><td>${or(weightDisplay(set.weight_kg, settings), ' '+settings.weightUnit)}</td><td>${or(set.reps)}</td></tr>`;
+    return `<tr><td>${n}</td><td>${or(weightDisplay(set.weight_kg, settings), ' '+settings.weightUnit)}</td><td>${or(set.reps)}</td></tr>`;
   }
-  if (type==='bodyweight') return `<tr><td>${idx+1}</td><td>${or(set.reps, ' reps')}</td></tr>`;
+  if (type==='bodyweight') return `<tr><td>${n}</td><td>${or(set.reps, ' reps')}</td></tr>`;
   const dur = set.duration_s ? formatClock(set.duration_s) : '—';
-  return `<tr><td>${idx+1}</td><td>${dur}</td><td>${or(distanceDisplay(set.distance_m, settings), ' '+settings.distanceUnit)}</td><td>${or(set.calories, ' cal')}</td><td>${or(set.elevation_gain_m, ' m')}</td></tr>`;
+  return `<tr><td>${n}</td><td>${dur}</td><td>${or(distanceDisplay(set.distance_m, settings), ' '+settings.distanceUnit)}</td><td>${or(set.calories, ' cal')}</td><td>${or(set.elevation_gain_m, ' m')}</td></tr>`;
 }
 
 /* ── Library ──────────────────────────────────────────────────── */
@@ -922,6 +1053,13 @@ function renderLibrary() {
 const allData = () => ({
   workouts:DB.getWorkouts(), sets:DB.getSets(), exercises:DB.getExercises(), bodyWeightLogs:DB.getBodyWeightLogs(),
 });
+// Memoised on the cache revision: rebuilt at most once per data change.
+let _statsIdx = null, _statsRev = -1;
+function statsIndex() {
+  if (_statsRev !== DB.rev()) { _statsIdx = buildStatsIndex(allData()); _statsRev = DB.rev(); }
+  return _statsIdx;
+}
+
 const heatFill = intensity => slug => slug in intensity ? heatColor(intensity[slug]) : NON_MUSCLE_FILL;
 
 // Weigh-ins feed the bodyweight-exercise volume, so recolour the map in place.
@@ -1674,6 +1812,7 @@ function handleClick(e) {
 
   if (action==='add-set') { addSetToExercise(btn.dataset.wid, btn.dataset.exid); return; }
   if (action==='toggle-set') { toggleSet(btn.dataset.setid); return; }
+  if (action==='fill-prev')  { fillSetFromPrev(btn.dataset.setid); return; }
   if (action==='remove-exercise') { removeExerciseFromWorkout(btn.dataset.wid, btn.dataset.exid); return; }
 
   if (action==='finish-workout') {
@@ -1681,7 +1820,9 @@ function handleClick(e) {
     if (!workout) return;
     DB.saveWorkout({ id:workout.id, finished_at:new Date().toISOString() });
     clearInterval(timerInterval);
+    const prs = workoutPRs(workout, DB.getSetsForWorkout(workout.id), statsIndex()).count;
     Router.navigate(`/history/${workout.id}`);
+    showToast(prs ? `Workout saved · ${prs} PR${prs!==1?'s':''} 🏆` : 'Workout saved.');
     return;
   }
 
@@ -1857,6 +1998,7 @@ function handleInput(e) {
     else if (field==='elevation') patch = { elevation_gain_m: val };
     else return;
     DB.saveSets([{ id:setid, ...patch }]);
+    refreshExerciseLive(set.workout_id, set.exercise_id);
     return;
   }
 
@@ -1922,23 +2064,36 @@ function addSetToExercise(wid, exId) {
   const ex      = DB.getExercise(exId);
   if (!workout || !ex) return;
   const existing = DB.getSetsForWorkout(wid).filter(s=>s.exercise_id===exId);
-  const [set]    = DB.saveSets([makeSet(wid, exId, existing[existing.length-1])]);
+  const { prev } = exerciseCtx(workout, exId);
+  // If last time had a matching set, leave it empty: its placeholders show
+  // last time and ticking fills them. Otherwise copy the previous set.
+  const copy  = prev?.sets[existing.length] ? null : existing[existing.length-1];
+  const [set] = DB.saveSets([makeSet(wid, exId, copy)]);
   const container = document.querySelector(`.set-rows[data-exid="${exId}"]`);
-  if (container) container.insertAdjacentHTML('beforeend', renderSetRow(set, existing.length, ex.type, getSettings()));
+  if (container) container.insertAdjacentHTML('beforeend', renderSetRow(set, existing.length, ex.type, getSettings(), { prev, prs:cardPRs(workout, ex).bySet }));
+  refreshExerciseLive(wid, exId);
 }
 
 function toggleSet(setId) {
-  const set = DB.getSets().find(s=>s.id===setId);
-  if (!set) return;
-  DB.saveSets([{ id:setId, completed:!set.completed }]);
-  document.querySelector(`.set-row[data-setid="${setId}"]`)?.classList.toggle('completed', set.completed);
-  document.querySelector(`.set-check[data-setid="${setId}"]`)?.classList.toggle('done', set.completed);
+  const c = setRowContext(setId);
+  if (!c) return;
+  const completed = !c.set.completed;
+  // Ticking an empty set uses what you did last time.
+  const fill = completed && !hasValues(c.set, c.ex.type) && c.prevSet ? pickMetrics(c.prevSet, c.ex.type) : null;
+  DB.saveSets([{ id:setId, completed, ...fill }]);
+  if (fill) rerenderSetRow(c);
+  else {
+    document.querySelector(`.set-row[data-setid="${setId}"]`)?.classList.toggle('completed', completed);
+    document.querySelector(`.set-check[data-setid="${setId}"]`)?.classList.toggle('done', completed);
+  }
+  refreshExerciseLive(c.workout.id, c.ex.id);
 }
 
 function removeExerciseFromWorkout(wid, exId) {
   if (!DB.getWorkout(wid)) return;
   DB.deleteSets(DB.getSetsForWorkout(wid).filter(s=>s.exercise_id===exId).map(s=>s.id));
   document.querySelector(`.exercise-card[data-exid="${exId}"]`)?.remove();
+  refreshExerciseLive(wid);
 }
 
 /* ═══════════════════════════════════════════════════════════════

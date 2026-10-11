@@ -671,9 +671,7 @@ input { font-size: 16px; }
 .set-row.completed { background: color-mix(in srgb, var(--success) 9%, transparent); }
 .set-row:last-child { border-bottom: none; }
 
-.set-row.type-strength   { grid-template-columns: 24px 1fr 18px 1fr 38px; }
-.set-row.type-bodyweight { grid-template-columns: 24px 1fr 38px; }
-.set-row.type-cardio     { grid-template-columns: 24px 1fr 1fr 1fr 1fr 38px; }
+
 
 .set-num { font-size: 13px; font-weight: 700; color: var(--fg3); text-align: center; }
 
@@ -691,7 +689,6 @@ input { font-size: 16px; }
 }
 
 .set-input:focus { border-color: var(--accent); background: var(--bg2); }
-.set-sep { color: var(--fg3); font-size: 13px; text-align: center; font-weight: 600; }
 
 .set-check {
   width: 38px; height: 38px;
@@ -747,10 +744,78 @@ input { font-size: 16px; }
 }
 
 .add-exercise-btn:active { opacity: 0.6; }
+.add-exercise-btn svg { width: 20px; height: 20px; flex-shrink: 0; }
 
-.set-row-header.type-strength    { grid-template-columns: 24px 1fr 18px 1fr 38px; }
-.set-row-header.type-bodyweight  { grid-template-columns: 24px 1fr 38px; }
-.set-row-header.type-cardio      { grid-template-columns: 24px 1fr 1fr 1fr 1fr 38px; }
+/* # | Previous | kg | Reps | ✓  (Previous takes the slack: ~108px on a 390px phone) */
+.set-row-header { gap: 8px; }
+.set-row.type-strength,   .set-row-header.type-strength   { grid-template-columns: 24px minmax(0,1fr) 68px 56px 38px; }
+.set-row.type-bodyweight, .set-row-header.type-bodyweight { grid-template-columns: 24px minmax(0,1fr) 72px 38px; }
+.set-row.type-cardio,     .set-row-header.type-cardio     { grid-template-columns: 24px minmax(0,1.4fr) repeat(3,minmax(0,1fr)) 38px; }
+.set-row.type-cardio .set-input { padding: 9px 2px; }
+.set-input { min-width: 0; }
+
+.set-prev {
+  min-width: 0;
+  padding: 9px 2px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg3);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+.set-prev:not(:disabled):active { background: var(--bg3); }
+.set-prev:disabled { color: var(--bg4); cursor: default; }
+
+.set-num { display: flex; justify-content: center; }
+.pr-chip {
+  display: none;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  line-height: 1.2;
+  color: #fff;
+  background: #e8a020;
+  border-radius: var(--pill-radius);
+  padding: 2px 4px;
+  white-space: nowrap;
+}
+.set-row.is-pr .set-idx { display: none; }
+.set-row.is-pr .pr-chip, .pr-chip.inline { display: inline-block; }
+.pr-chip.inline { margin-left: 6px; vertical-align: 1px; }
+
+.exercise-last {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 16px;
+  font-size: 12.5px;
+  color: var(--fg3);
+  border-bottom: 1px solid var(--bg3);
+  background: color-mix(in srgb, var(--accent-bg) 45%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.exercise-last strong { color: var(--fg2); }
+.link-btn { padding: 0; text-align: left; color: inherit; }
+.exercise-card-name.link-btn { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.workout-header-main { flex: 1; min-width: 0; }
+.workout-lifted {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  font-size: 17px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.workout-lifted small { font-size: 11px; font-weight: 600; color: var(--fg3); text-transform: uppercase; letter-spacing: 0.6px; }
+.stat3-val.sm { font-size: 22px; letter-spacing: -0.5px; white-space: nowrap; }
 
 /* ── History ───────────────────────────────────────────────────── */
 .history-list { padding: 16px 16px; display: flex; flex-direction: column; gap: 12px; }
