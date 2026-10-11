@@ -1,7 +1,7 @@
 import { supabase, supabaseConfigured } from './supabase.js';
 import { DB } from './db.js';
 import { uuid, localDate, parseLocalDate, groupSets } from './util.js';
-import { weightDisplay, weightToKg, distanceDisplay, distanceToM } from './units.js';
+import { weightDisplay, weightToKg, distanceDisplay, distanceToM, formatClock, formatLifted, durationFromDigits } from './units.js';
 import { detectLocalLegacyData, isLegacyBackup, runLegacyImport, legacyImportDone } from './legacy-import.js';
 import { MUSCLE_SLUGS, UPPER_SLUGS, LOWER_SLUGS, CORE_SLUGS, muscleLabel, slugMuscles, hasOnlySlugs } from './muscles.js';
 import { renderBodySVG } from './body-map.js';
@@ -77,12 +77,15 @@ function formatElapsed(startIso) {
     : `${String(m).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
 }
 
-function formatDurationInput(sec) {
-  return `${String(Math.floor(sec/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`;
-}
-function parseDurationInput(s) {
-  const p=s.split(':');
-  return p.length===2 ? parseInt(p[0])*60+parseInt(p[1]) : parseInt(s)||0;
+// Cardio time box: digits fill from the right like a microwave (2530 → 25:30),
+// so the iPhone number pad (no ':' key) works. A pasted "25:30" also parses.
+function applyDurationMask(el, e) {
+  const parts = el.value.trim().split(':');
+  const pasted = e?.inputType === 'insertFromPaste' && parts.length > 1 && parts.length <= 3 && parts.every(p => /^\d+$/.test(p));
+  const r = durationFromDigits(pasted ? parts.map((p, i) => i ? p.padStart(2, '0').slice(-2) : p).join('') : el.value);
+  el.value = r.text;
+  el.setSelectionRange?.(r.text.length, r.text.length);
+  return r.sec;
 }
 
 function categoryLabel(c) { return {strength:'Strength',cardio:'Cardio',bodyweight:'Bodyweight'}[c]||c; }
@@ -701,7 +704,7 @@ function renderSetRow(set, idx, type, settings) {
   const rowCls = set.completed ? 'completed' : '';
   const check = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>`;
   const input = (field, value, placeholder, mode='decimal', inputType='number') =>
-    `<input class="set-input" type="${inputType}" inputmode="${mode}" placeholder="${placeholder}" value="${escHtml(value)}" data-action="set-field" data-setid="${set.id}" data-field="${field}"${inputType==='number'?' min="0"':''}>`;
+    `<input class="set-input" type="${inputType}" inputmode="${mode}" placeholder="${placeholder}" value="${escHtml(value)}" data-action="set-field" data-setid="${set.id}" data-field="${field}"${inputType==='number'?' min="0"':' pattern="[0-9]*" autocomplete="off"'}>`;
   const checkBtn = `<button class="set-check ${done}" data-action="toggle-set" data-setid="${set.id}">${check}</button>`;
 
   if (type==='strength') {
@@ -722,7 +725,7 @@ function renderSetRow(set, idx, type, settings) {
   }
   return `<div class="set-row type-cardio ${rowCls}" data-setid="${set.id}">
     <span class="set-num">${idx+1}</span>
-    ${input('duration', set.duration_s ? formatDurationInput(set.duration_s) : '', 'mm:ss', 'numeric', 'text')}
+    ${input('duration', set.duration_s ? formatClock(set.duration_s) : '', '0:00', 'numeric', 'text')}
     ${input('distance', distanceDisplay(set.distance_m, settings), settings.distanceUnit)}
     ${input('calories', set.calories ?? '', 'cal', 'numeric')}
     ${input('elevation', set.elevation_gain_m ?? '', 'm', 'numeric')}
@@ -831,7 +834,7 @@ function renderDetailSetRow(set, idx, type, settings) {
     return `<tr><td>${idx+1}</td><td>${or(weightDisplay(set.weight_kg, settings), ' '+settings.weightUnit)}</td><td>${or(set.reps)}</td></tr>`;
   }
   if (type==='bodyweight') return `<tr><td>${idx+1}</td><td>${or(set.reps, ' reps')}</td></tr>`;
-  const dur = set.duration_s ? formatDurationInput(set.duration_s) : '—';
+  const dur = set.duration_s ? formatClock(set.duration_s) : '—';
   return `<tr><td>${idx+1}</td><td>${dur}</td><td>${or(distanceDisplay(set.distance_m, settings), ' '+settings.distanceUnit)}</td><td>${or(set.calories, ' cal')}</td><td>${or(set.elevation_gain_m, ' m')}</td></tr>`;
 }
 
@@ -1431,6 +1434,21 @@ document.addEventListener('change', e=>{ if (e.target.type==='date') handleInput
 document.addEventListener('submit', e=>{
   if (e.target.id==='login-form') { e.preventDefault(); submitLogin(); }
 });
+// Duration boxes: caret to the end on focus/tap (iOS places it after focusin),
+// and tidy the display on blur (0:90 → 1:30).
+const caretToEnd = e=>{
+  const el = e.target;
+  if (el.dataset?.field !== 'duration') return;
+  requestAnimationFrame(()=>el.setSelectionRange?.(el.value.length, el.value.length));
+};
+document.addEventListener('focusin', caretToEnd);
+document.addEventListener('pointerup', caretToEnd);
+document.addEventListener('focusout', e=>{
+  const el = e.target;
+  if (el.dataset?.field !== 'duration') return;
+  const set = DB.getSets().find(s=>s.id===el.dataset.setid);
+  el.value = set?.duration_s ? formatClock(set.duration_s) : '';
+});
 document.addEventListener('keydown', e=>{
   if (e.key==='Enter' && document.activeElement?.id==='onboarding-name')
     document.querySelector('[data-action="onboarding-submit"]')?.click();
@@ -1819,7 +1837,7 @@ function handleInput(e) {
     const n   = raw==='' ? null : parseFloat(raw);
     const val = Number.isFinite(n) ? n : null;
     let patch;
-    if      (field==='duration')  { const d = parseDurationInput(raw); patch = { duration_s: Number.isFinite(d) && d > 0 ? d : null }; }
+    if      (field==='duration')  patch = { duration_s: applyDurationMask(el, e) || null };
     else if (field==='weight')    patch = { weight_kg: val==null ? null : weightToKg(val, settings) };
     else if (field==='reps')      patch = { reps: val==null ? null : Math.round(val) };
     else if (field==='distance')  patch = { distance_m: val==null ? null : distanceToM(val, settings) };
