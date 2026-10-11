@@ -43,9 +43,10 @@ const userName    = () => currentUser()?.user_metadata?.name || '';
 
 // Units are a per-device display preference; data is always kg / m / s.
 const SETTINGS_KEY = 'gt_settings';
+const DEFAULT_SETTINGS = { weightUnit:'kg', distanceUnit:'km', restSeconds:90 };
 function getSettings() {
-  try { return { weightUnit:'kg', distanceUnit:'km', ...JSON.parse(localStorage.getItem(SETTINGS_KEY)) }; }
-  catch { return { weightUnit:'kg', distanceUnit:'km' }; }
+  try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY)) }; }
+  catch { return { ...DEFAULT_SETTINGS }; }
 }
 function saveSettings(s) { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
 
@@ -901,7 +902,127 @@ function refreshExerciseLive(wid, exId) {
   if (el) el.textContent = liftedText(workoutLiftedKg(DB.getSetsForWorkout(wid), exByIdMap()), getSettings());
 }
 
-function renderRest() {}
+/* ── Rest timer ── */
+// State is timestamp-based and persisted, so it survives navigation,
+// reloads and the app being backgrounded. The pill floats above the tab bar.
+const REST_KEY = 'gt_rest', REST_DONE_MS = 4000;
+const REST_CHOICES = [[0,'Off'], [60,'1:00'], [90,'1:30'], [120,'2:00'], [180,'3:00']];
+let rest = loadRest();            // { endsAt:ms, total:s } | null
+let restTick = null, restDoneTimer = null, audioCtx = null;
+
+function loadRest() { try { return JSON.parse(localStorage.getItem(REST_KEY)); } catch { return null; } }
+function saveRest() {
+  try { rest ? localStorage.setItem(REST_KEY, JSON.stringify(rest)) : localStorage.removeItem(REST_KEY); } catch {}
+}
+
+function startRest(sec) {
+  clearTimeout(restDoneTimer);
+  document.getElementById('rest-pill')?.remove();   // e.g. still showing "Rest done"
+  rest = { endsAt:Date.now() + sec * 1000, total:sec };
+  saveRest();
+  renderRest();
+}
+
+function adjustRest(delta) {
+  if (!rest) return;
+  rest.endsAt += delta * 1000;
+  rest.total = Math.max(rest.total + delta, 1);
+  if (rest.endsAt <= Date.now()) { clearRest(); return; }
+  saveRest();
+  tickRest();
+}
+
+function clearRest() {
+  rest = null; saveRest();
+  clearInterval(restTick); restTick = null;
+  clearTimeout(restDoneTimer);
+  document.getElementById('rest-pill')?.remove();
+  document.body.classList.remove('rest-active');
+}
+
+function tickRest() {
+  if (!rest) return;
+  const left = rest.endsAt - Date.now();
+  // Ended while backgrounded: no sound; show "done" only if it was recent.
+  if (left <= 0) { finishRest(left > -2000 ? 'alert' : left > -60000 ? 'quiet' : 'gone'); return; }
+  const el = document.getElementById('rest-pill');
+  if (!el) return;
+  el.querySelector('#rest-time').textContent = formatClock(Math.ceil(left / 1000));
+  el.style.setProperty('--p', Math.min(left / (rest.total * 1000), 1));
+}
+
+function finishRest(mode) {
+  clearInterval(restTick); restTick = null;
+  rest = null; saveRest();
+  if (mode === 'gone') { clearRest(); return; }
+  if (mode === 'alert') { beep(); navigator.vibrate?.([200, 100, 200]); }
+  const el = document.getElementById('rest-pill');
+  if (el) {
+    el.classList.add('done');
+    el.innerHTML = `<button class="rest-main" data-action="rest-dismiss" role="status">Rest done — next set!</button>`;
+  }
+  restDoneTimer = setTimeout(clearRest, REST_DONE_MS);
+}
+
+function renderRest() {
+  // Finished, discarded, deleted, cleared, restored… no active workout → no timer.
+  if (rest && session && !DB.getActiveWorkout()) { clearRest(); return; }
+  let el = document.getElementById('rest-pill');
+  if (!rest && !el) return;
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'rest-pill';
+    el.className = 'rest-pill';
+    el.setAttribute('role', 'timer');
+    el.innerHTML = `
+      <button class="rest-btn" data-action="rest-adjust" data-delta="-15" aria-label="15 seconds less">−15</button>
+      <button class="rest-main" data-action="resume-workout" aria-label="Rest timer, open workout">
+        <span class="rest-label">Rest</span><span class="rest-time" id="rest-time"></span>
+      </button>
+      <button class="rest-btn" data-action="rest-adjust" data-delta="15" aria-label="15 seconds more">+15</button>
+      <button class="rest-btn" data-action="rest-skip">Skip</button>`;
+    document.body.appendChild(el);
+  }
+  const on = document.body.classList.contains('has-tabbar');   // only on tabbed screens
+  el.hidden = !on;
+  document.body.classList.toggle('rest-active', on);
+  if (rest && !restTick) restTick = setInterval(tickRest, 500);
+  tickRest();
+}
+
+// iOS only allows audio once a context is started inside a tap: call this
+// synchronously from the click that starts or adjusts the timer.
+function unlockAudio() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  try {
+    if (navigator.audioSession) navigator.audioSession.type = 'transient';
+    audioCtx ||= new AC();
+    if (audioCtx.state !== 'running') audioCtx.resume().catch(()=>{});
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    g.gain.value = 0;
+    o.connect(g).connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + 0.01);
+  } catch {}
+}
+
+function beep() {
+  if (audioCtx?.state !== 'running') return;
+  const t0 = audioCtx.currentTime;
+  [0, 0.22, 0.44].forEach((dt, i) => {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.frequency.value = i === 2 ? 1320 : 880;
+    g.gain.setValueAtTime(0.0001, t0 + dt);
+    g.gain.exponentialRampToValueAtTime(0.4, t0 + dt + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.18);
+    o.connect(g).connect(audioCtx.destination);
+    o.start(t0 + dt); o.stop(t0 + dt + 0.2);
+  });
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { audioCtx?.resume().catch(()=>{}); tickRest(); }
+});
 
 /* ── Past workouts ── */
 const hhmm = d => `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
@@ -1724,6 +1845,21 @@ function renderSettings() {
         </div>
 
         <div class="settings-section">
+          <div class="settings-label">Training</div>
+          <div class="settings-card">
+            <div class="settings-row settings-row-stack">
+              <span class="settings-row-label">Rest timer</span>
+              <div class="segment-control">
+                ${REST_CHOICES.map(([sec, label]) =>
+                  `<button class="seg-btn ${settings.restSeconds===sec?'active':''}" data-action="set-rest" data-sec="${sec}">${label}</button>`).join('')}
+              </div>
+              <span class="settings-hint">Starts when you tick a set. iPhone can't play the alert while the app is in the background or on silent.</span>
+            </div>
+            <!--templates-row-->
+          </div>
+        </div>
+
+        <div class="settings-section">
           <div class="settings-label">Data</div>
           <div class="settings-card">
             <div class="settings-row">
@@ -1890,12 +2026,14 @@ function handleClick(e) {
     const active = DB.getActiveWorkout();
     if (active) {
       showConfirm('Discard', 'A workout is already in progress. Discard it?', ()=>{
-        DB.deleteWorkout(active.id); openStart();
+        DB.deleteWorkout(active.id); clearRest(); openStart();
       });
     } else openStart();
     return;
   }
-  if (action==='resume-workout') { Router.navigate('/workout/active'); return; }
+  if (action==='resume-workout') { unlockAudio(); Router.navigate('/workout/active'); return; }
+  if (action==='rest-adjust')    { unlockAudio(); adjustRest(Number(btn.dataset.delta)); return; }
+  if (action==='rest-skip' || action==='rest-dismiss') { clearRest(); return; }
 
   /* ── Progress: body weight ── */
   if (action==='weight-save')     { saveWeight(); return; }
@@ -2091,6 +2229,7 @@ function handleClick(e) {
     if (!workout) return;
     DB.saveWorkout({ id:workout.id, finished_at:new Date().toISOString() });
     clearInterval(timerInterval);
+    clearRest();
     const prs = workoutPRs(workout, DB.getSetsForWorkout(workout.id), statsIndex()).count;
     Router.navigate(`/history/${workout.id}`);
     showToast(prs ? `Workout saved · ${prs} PR${prs!==1?'s':''} 🏆` : 'Workout saved.');
@@ -2102,6 +2241,7 @@ function handleClick(e) {
       const active = DB.getActiveWorkout();
       if (active) DB.deleteWorkout(active.id);
       clearInterval(timerInterval);
+      clearRest();
       Router.navigate('/home');
     });
     return;
@@ -2174,6 +2314,12 @@ function handleClick(e) {
   }
   if (action==='set-distance-unit') {
     const s = getSettings(); s.distanceUnit=btn.dataset.unit; saveSettings(s); Router.route(); return;
+  }
+  if (action==='set-rest') {
+    const s = getSettings(); s.restSeconds = Number(btn.dataset.sec); saveSettings(s);
+    if (!s.restSeconds) clearRest();
+    Router.route();
+    return;
   }
 
   if (action==='sign-out') {
@@ -2386,6 +2532,9 @@ function toggleSet(setId) {
     document.querySelector(`.set-check[data-setid="${setId}"]`)?.classList.toggle('done', completed);
   }
   refreshExerciseLive(c.workout.id, c.ex.id);
+  // Ticking a set in the live workout starts the rest timer.
+  const secs = getSettings().restSeconds;
+  if (completed && secs > 0 && c.workout.id === DB.getActiveWorkout()?.id) { unlockAudio(); startRest(secs); }
 }
 
 function removeExerciseFromWorkout(wid, exId) {
@@ -2480,6 +2629,8 @@ export async function init() {
         await DB.reset();
         legacyLocal = null;
         clearInterval(timerInterval);
+        clearRest();
+        pickerState = freshPickerState();
         Router.navigate('/login');
       }, 0);
     }
