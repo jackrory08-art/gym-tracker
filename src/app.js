@@ -829,8 +829,8 @@ function exerciseCtx(workout, exId) {
   return c;
 }
 
-function cardPRs(workout, ex) {
-  const sets = DB.getSetsForWorkout(workout.id).filter(s=>s.exercise_id===ex.id);
+function cardPRs(workout, ex, wSets = DB.getSetsForWorkout(workout.id)) {
+  const sets = wSets.filter(s=>s.exercise_id===ex.id);
   return sessionPRs(countedSets(sets, ex.type), ex.type, exerciseCtx(workout, ex.id).bests);
 }
 
@@ -897,9 +897,10 @@ function fillSetFromPrev(setId) {
 function refreshExerciseLive(wid, exId) {
   const workout = DB.getWorkout(wid);
   if (!workout) return;
+  const wSets = DB.getSetsForWorkout(wid);
   const ex = exId && DB.getExercise(exId);
   if (ex) {
-    const prs = cardPRs(workout, ex).bySet;
+    const prs = cardPRs(workout, ex, wSets).bySet;
     document.querySelectorAll(`.set-rows[data-exid="${ex.id}"] .set-row`).forEach(row=>{
       const kinds = prs.get(row.dataset.setid);
       row.classList.toggle('is-pr', !!kinds);
@@ -908,7 +909,7 @@ function refreshExerciseLive(wid, exId) {
     });
   }
   const el = document.getElementById('workout-lifted');
-  if (el) el.textContent = liftedText(workoutLiftedKg(DB.getSetsForWorkout(wid), exByIdMap()), getSettings());
+  if (el) el.textContent = liftedText(workoutLiftedKg(wSets, exByIdMap()), getSettings());
 }
 
 /* ── Rest timer ── */
@@ -1068,7 +1069,9 @@ function workoutTimes(date, time, h, m) {
   const mins = Math.round((parseFloat(h) || 0) * 60 + (parseFloat(m) || 0));
   if (!(mins > 0))  return { error:'Enter how long the workout took.' };
   if (mins > 1440) return { error:'Duration must be under 24 hours.' };
-  return { date, started_at:start.toISOString(), finished_at:new Date(start.getTime() + mins * 60000).toISOString() };
+  const end = new Date(start.getTime() + mins * 60000);
+  if (end > new Date()) return { error:'That workout would end in the future — check the start time and duration.' };
+  return { date, started_at:start.toISOString(), finished_at:end.toISOString() };
 }
 
 const readTimes = prefix => {
@@ -1076,16 +1079,29 @@ const readTimes = prefix => {
   return workoutTimes(v('date'), v('time'), v('dur-h'), v('dur-m'));
 };
 
-function defaultPastTime(date) {
-  if (date !== localDate()) return '18:00';
-  const d = new Date(Date.now() - 60 * 60000);
-  if (localDate(d) !== date) return '00:00';
-  d.setMinutes(Math.floor(d.getMinutes() / 5) * 5);
-  return hhmm(d);
+// Default start + duration for a past workout: 18:00 for 1 h on earlier
+// days; today, an hour that ends now (or since midnight, if it's early).
+function defaultPastTimes(date) {
+  if (date !== localDate()) return { time:'18:00', h:1, m:0 };
+  const now = new Date(), d = new Date(now.getTime() - 60 * 60000);
+  if (localDate(d) !== date) {
+    const mins = Math.max(now.getHours() * 60 + now.getMinutes(), 1);
+    return { time:'00:00', h:Math.floor(mins / 60), m:mins % 60 };
+  }
+  d.setMinutes(Math.floor(d.getMinutes() / 5) * 5, 0, 0);
+  return { time:hhmm(d), h:1, m:0 };
+}
+
+// A sheet that's still fading out (closeModal waits 250 ms) mustn't block reopening.
+function sheetIsOpen(id) {
+  const el = document.getElementById(id);
+  if (el?.classList.contains('visible')) return true;
+  el?.remove();
+  return false;
 }
 
 function showPastWorkoutSheet(date = localDate()) {
-  if (document.getElementById('past-sheet')) return;
+  if (sheetIsOpen('past-sheet')) return;
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.id = 'past-sheet';
@@ -1094,7 +1110,7 @@ function showPastWorkoutSheet(date = localDate()) {
       <div class="sheet-handle"></div>
       <div class="sheet-title">Log Past Workout</div>
       <div class="editor-meta sheet">
-        ${renderTimesFields('past', { date, time:defaultPastTime(date), h:1, m:0 })}
+        ${renderTimesFields('past', { date, ...defaultPastTimes(date) })}
         ${renderPastTemplateChoice()}
       </div>
       <div class="form-error" id="past-error" hidden></div>
@@ -1162,7 +1178,7 @@ function templateItemsFromWorkout(wid) {
 }
 
 function showStartSheet() {
-  if (document.getElementById('start-sheet')) return;
+  if (sheetIsOpen('start-sheet')) return;
   const tpls = DB.getTemplates();
   const dumbbell = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6.5 6.5h11M6.5 17.5h11M2 12h2m16 0h2M4 10v4M20 10v4"/></svg>`;
   const overlay = document.createElement('div');
@@ -1570,11 +1586,19 @@ const EX_METRICS = {
 };
 const exMetric = ex => EX_METRICS[ex.type].find(m=>m.id===exerciseState.metric) || EX_METRICS[ex.type][0];
 
+// Page + chart (+ metric toggles, resizes) share one computation per data change.
+let _exHist = { key:null, val:null };
+function exerciseHistoryCached(exId) {
+  const key = `${exId}|${DB.rev()}`;
+  if (_exHist.key !== key) _exHist = { key, val:exerciseHistory(exId, statsIndex()) };
+  return _exHist.val;
+}
+
 function renderExerciseDetail(exId) {
   const ex = DB.getExercise(exId);
   if (!ex) { Router.navigate('/library'); return '<div></div>'; }
   const settings = getSettings();
-  const { sessions, bests } = exerciseHistory(ex.id, statsIndex());
+  const { sessions, bests } = exerciseHistoryCached(ex.id);
   const muscles = musclesText(ex, 3);
   const dash = v => v == null ? '—' : v;
   const tile = (val, unit, label) => `<div class="ex-stat"><div class="ex-stat-val">${val}${unit && val!=='—' ? `<small>${unit}</small>` : ''}</div><div class="ex-stat-label">${label}</div></div>`;
@@ -1650,7 +1674,7 @@ function drawExerciseChart() {
   const ex   = wrap && DB.getExercise(wrap.dataset.exid);
   if (!ex) return;
   const settings = getSettings(), metric = exMetric(ex);
-  const pts = exerciseHistory(ex.id, statsIndex()).sessions.slice().reverse()
+  const pts = exerciseHistoryCached(ex.id).sessions.slice().reverse()
     .map(x => ({ t:parseLocalDate(x.date).getTime(), v:metric.v(x.summary, settings) }))
     .filter(p => p.v > 0);
   if (!pts.length) { wrap.innerHTML = `<div class="chart-empty">No ${metric.label.toLowerCase()} data yet.</div>`; return; }
@@ -2684,7 +2708,7 @@ function handleClick(e) {
           migrateMuscleSlugs();
           Router.navigate('/home');
           showToast(templatesSkipped
-            ? `Backup restored, except ${templatesSkipped} template${templatesSkipped!==1?'s':''} — templates aren't set up on the server yet.`
+            ? `Backup restored, except ${templatesSkipped} template${templatesSkipped!==1?'s':''} (templates aren't set up on the server yet, or couldn't be saved).`
             : 'Backup restored.', templatesSkipped ? 8000 : 3500);
         } catch (err) {
           showToast('Restore failed: ' + err.message);

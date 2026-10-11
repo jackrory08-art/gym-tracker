@@ -199,14 +199,15 @@ async function fetchTable(table) {
   }
 }
 
-// Optional table: null when it doesn't exist (or isn't usable) on the server.
-// Network / server errors still throw so load() can fall back to the snapshot.
+// Optional table → { rows } | { missing:true } (table doesn't exist) |
+// { unavailable:true } (other refusal, e.g. missing grant). Network /
+// server errors still throw so load() can fall back to the snapshot.
 async function fetchOptional(table) {
-  try { return await fetchTable(table); }
+  try { return { rows:await fetchTable(table) }; }
   catch (e) {
     if (isRetryable(e.status ?? 0)) throw e;
     console.warn(`${table} unavailable`, e);
-    return null;
+    return isMissingTable(e, e.status) ? { missing:true } : { unavailable:true };
   }
 }
 
@@ -221,7 +222,7 @@ async function remoteDeleteAll() {
 // Template items: [{ exercise_id, sets 1–20 }], other keys kept.
 const cleanTemplateItems = items => (Array.isArray(items) ? items : [])
   .filter(i => i && typeof i.exercise_id === 'string')
-  .map(i => { const n = Math.round(+i.sets); return { ...i, sets: n >= 1 ? Math.min(n, 20) : 3 }; });
+  .map(i => { const n = Math.round(+i.sets); return { ...i, sets: n >= 1 ? Math.min(n, 20) : 1 }; });
 
 /* ── Public API ─────────────────────────────────────────────── */
 export const DB = {
@@ -232,15 +233,16 @@ export const DB = {
   async load(userId) {
     _userId = userId;
     loadOutbox();
-    let fresh = null, online = false, tplOk = false;
+    let fresh = null, online = false, tplOk = false, tplMissing = false;
     try {
       // Weak gym signal shouldn't hang startup: give up and use the snapshot.
       const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('load timed out')), LOAD_TIMEOUT));
       const results = await Promise.race([Promise.all([...TABLES.map(fetchTable), fetchOptional(TEMPLATES)]), timeout]);
       fresh = Object.fromEntries(TABLES.map((t, i) => [t, results[i]]));
       const tpl = results[TABLES.length];
-      tplOk = tpl !== null;
-      fresh[TEMPLATES] = tpl || [];
+      tplOk = !!tpl.rows;
+      tplMissing = !!tpl.missing;
+      fresh[TEMPLATES] = tpl.rows || [];
       online = true;
     } catch (e) {
       console.warn('Supabase unreachable, starting from offline snapshot', e);
@@ -249,8 +251,8 @@ export const DB = {
       tplOk = !!snap?.templatesAvailable;
     }
     _templatesOk = tplOk;
-    // The server can't take template writes: drop any still queued.
-    if (online && !tplOk && _outbox.some(op => op.table === TEMPLATES)) {
+    // The table doesn't exist, so queued template writes can never succeed.
+    if (online && tplMissing && _outbox.some(op => op.table === TEMPLATES)) {
       console.warn('Dropping queued template changes: templates table missing');
       _outbox = _outbox.filter(op => op.table !== TEMPLATES);
       saveOutbox();
@@ -327,7 +329,7 @@ export const DB = {
   async recheckTemplates() {
     if (_templatesOk) return true;
     try {
-      const rows = await fetchOptional(TEMPLATES);
+      const { rows } = await fetchOptional(TEMPLATES);
       if (rows) { _cache[TEMPLATES] = rows; _templatesOk = true; _rev++; saveSnapshot(); }
     } catch {}
     return _templatesOk;
@@ -355,10 +357,13 @@ export const DB = {
     await remoteDeleteAll();
     for (const t of TABLES) await DB.remoteUpsert(t, data[t] || []);
     // Backups made before templates existed have no key → no templates.
-    const tpl = Array.isArray(data[TEMPLATES]) ? data[TEMPLATES] : [];
+    const tpl = (Array.isArray(data[TEMPLATES]) ? data[TEMPLATES] : [])
+      .filter(t => t?.id && String(t.name ?? '').trim())
+      .map(t => ({ ...t, name:String(t.name).trim(), exercises:cleanTemplateItems(t.exercises) }));
     let templatesSkipped = 0;
+    // Templates are optional: never abort a restore half-way because of them.
     try { await DB.remoteUpsert(TEMPLATES, tpl); }   // [] sends no request
-    catch (e) { if (!isMissingTable(e, e.status)) throw e; templatesSkipped = tpl.length; }
+    catch (e) { console.error('Templates not restored', e); templatesSkipped = tpl.length; }
     return { ...(await DB.load(_userId)), templatesSkipped };
   },
 

@@ -76,13 +76,8 @@ export function summarize(sets, type) {
   const sum = {
     weight:maxOf(sets, METRIC.weight), e1rm:maxOf(sets, METRIC.e1rm), reps:maxOf(sets, METRIC.reps),
     distance:maxOf(sets, METRIC.distance), duration:maxOf(sets, METRIC.duration),
-    volume:volume || null, totalReps:totalReps || null, topSet:null,
+    volume:volume || null, totalReps:totalReps || null,
   };
-  let best = -1;
-  for (const s of sets) {
-    const v = METRIC.e1rm(s) ?? METRIC.weight(s) ?? -1;
-    if (v > best) { best = v; sum.topSet = s; }
-  }
   return sum;
 }
 
@@ -128,15 +123,17 @@ export function buildStatsIndex({ workouts, sets, exercises }) {
   const finished = workouts.filter(w => w.finished_at).sort(compareWorkouts);
   for (const w of finished) {
     const wSets = setsByWorkout.get(w.id) || [];
-    liftedByWorkout.set(w.id, workoutLiftedKg(wSets, exById));
+    let kg = 0;
     for (const g of groupSets(wSets)) {
       const ex = exById.get(g.exerciseId);
       if (!ex) continue;
       const counted = countedSets(g.sets, ex.type);
+      for (const s of counted) kg += setLiftedKg(s, ex.type);
       if (!counted.length) continue;
       if (!sessionsByEx.has(ex.id)) sessionsByEx.set(ex.id, []);
       sessionsByEx.get(ex.id).push({ workout:w, sets:counted });
     }
+    liftedByWorkout.set(w.id, kg);
   }
   return { exById, setsByWorkout, sessionsByEx, liftedByWorkout };
 }

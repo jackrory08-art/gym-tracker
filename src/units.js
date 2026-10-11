@@ -13,7 +13,7 @@ export function distanceToM(v, s)     { return roundTo(v * (s.distanceUnit==='mi
 // Total weight lifted: "12,450 kg"; compact (tight rows) "27.4k lbs".
 export function formatLifted(kg, s, compact = false) {
   const v = s.weightUnit === 'lbs' ? kg / LB_TO_KG : kg, u = s.weightUnit;
-  if (compact && v >= 1e6) return `${Math.round(v / 1e5) / 10}M ${u}`;
+  if (compact && v >= 999950) return `${Math.round(v / 1e5) / 10}M ${u}`;   // not "1000k"
   if (compact && v >= 1e4) return `${Math.round(v / 1e2) / 10}k ${u}`;
   return `${Math.round(v).toLocaleString('en-GB')} ${u}`;
 }
