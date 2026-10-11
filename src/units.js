@@ -10,6 +10,26 @@ export function weightToKg(v, s)      { return roundTo(v * (s.weightUnit==='lbs'
 export function distanceDisplay(m, s) { return m==null ? '' : String(roundTo(m / (s.distanceUnit==='mi' ? MI_TO_M : 1000), 3)); }
 export function distanceToM(v, s)     { return roundTo(v * (s.distanceUnit==='mi' ? MI_TO_M : 1000), 1); }
 
+// Total weight lifted: "12,450 kg"; compact (tight rows) "27.4k lbs".
+export function formatLifted(kg, s, compact = false) {
+  const v = s.weightUnit === 'lbs' ? kg / LB_TO_KG : kg, u = s.weightUnit;
+  if (compact && v >= 1e6) return `${Math.round(v / 1e5) / 10}M ${u}`;
+  if (compact && v >= 1e4) return `${Math.round(v / 1e2) / 10}k ${u}`;
+  return `${Math.round(v).toLocaleString('en-GB')} ${u}`;
+}
+
+// Microwave-style time entry: digits fill from the right.
+// '130' → 1:30, '2530' → 25:30, '13000' → 1:30:00. Max 6 digits.
+export function durationFromDigits(raw) {
+  const d = String(raw ?? '').replace(/\D/g, '').replace(/^0+/, '').slice(0, 6);
+  if (!d) return { text:'', sec:0 };
+  const ss = d.slice(-2).padStart(2, '0'), mm = d.slice(-4, -2), h = d.slice(0, -4);
+  return {
+    text: h ? `${+h}:${mm.padStart(2, '0')}:${ss}` : `${+mm || 0}:${ss}`,
+    sec: (+h || 0) * 3600 + (+mm || 0) * 60 + +ss,
+  };
+}
+
 // Seconds → "m:ss" or "h:mm:ss".
 export function formatClock(sec) {
   const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = Math.round(sec % 60);
