@@ -2,6 +2,7 @@
 -- Gym Tracker schema — run once in Supabase Dashboard → SQL Editor.
 -- Every row belongs to one auth user; RLS limits each user to
 -- their own rows (auth.uid() = user_id) for all four operations.
+-- Existing projects created before templates: run 003_templates.sql.
 -- ═══════════════════════════════════════════════════════════════
 
 create table public.exercises (
@@ -48,11 +49,21 @@ create table public.body_weight_logs (
   unique (user_id, date)
 );
 
+-- Ordered [{"exercise_id":"<uuid>","sets":3}, …]; no FK into jsonb.
+create table public.workout_templates (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null default auth.uid() references auth.users (id) on delete cascade,
+  name       text not null check (btrim(name) <> ''),
+  exercises  jsonb not null default '[]'::jsonb check (jsonb_typeof(exercises) = 'array'),
+  created_at timestamptz default now()
+);
+
 create index exercises_user_id_idx  on public.exercises (user_id);
 create index workouts_user_date_idx on public.workouts (user_id, date);
 create index sets_workout_id_idx    on public.sets (workout_id);
 create index sets_exercise_id_idx   on public.sets (exercise_id);
 create index sets_user_id_idx       on public.sets (user_id);
+create index workout_templates_user_id_idx on public.workout_templates (user_id);
 
 -- ── Row Level Security ─────────────────────────────────────────
 
@@ -60,6 +71,7 @@ alter table public.exercises        enable row level security;
 alter table public.workouts         enable row level security;
 alter table public.sets             enable row level security;
 alter table public.body_weight_logs enable row level security;
+alter table public.workout_templates enable row level security;
 
 -- exercises
 create policy "exercises: select own" on public.exercises
@@ -99,4 +111,14 @@ create policy "body_weight_logs: insert own" on public.body_weight_logs
 create policy "body_weight_logs: update own" on public.body_weight_logs
   for update to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
 create policy "body_weight_logs: delete own" on public.body_weight_logs
+  for delete to authenticated using ((select auth.uid()) = user_id);
+
+-- workout_templates
+create policy "workout_templates: select own" on public.workout_templates
+  for select to authenticated using ((select auth.uid()) = user_id);
+create policy "workout_templates: insert own" on public.workout_templates
+  for insert to authenticated with check ((select auth.uid()) = user_id);
+create policy "workout_templates: update own" on public.workout_templates
+  for update to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
+create policy "workout_templates: delete own" on public.workout_templates
   for delete to authenticated using ((select auth.uid()) = user_id);

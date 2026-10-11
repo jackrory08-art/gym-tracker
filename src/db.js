@@ -11,7 +11,12 @@
 import Dexie from 'dexie';
 import { supabase } from './supabase.js';
 
-export const TABLES = ['exercises', 'workouts', 'sets', 'body_weight_logs'];
+// Core tables. legacy-import iterates these, so optional tables stay out.
+export const TABLES    = ['exercises', 'workouts', 'sets', 'body_weight_logs'];
+// Optional: needs supabase/003_templates.sql. If the table is missing the
+// app keeps working and simply hides templates.
+export const TEMPLATES = 'workout_templates';
+const ALL_TABLES = [...TABLES, TEMPLATES];
 const PAGE          = 1000;   // PostgREST default max rows per request
 const CHUNK         = 500;
 const FLUSH_DELAY   = 500;
@@ -21,7 +26,7 @@ const LOAD_TIMEOUT  = 10000;
 const snapshotDB = new Dexie('GymTrackerCache');
 snapshotDB.version(1).stores({ snapshot: '&userId' });
 
-const _cache = { exercises:[], workouts:[], sets:[], body_weight_logs:[] };
+const _cache = { exercises:[], workouts:[], sets:[], body_weight_logs:[], workout_templates:[] };
 
 let _userId     = null;
 let _outbox     = [];      // [{ table, op:'upsert'|'delete', rows?, ids? }]
@@ -33,6 +38,11 @@ let _retryDelay = 2000;
 let _snapTimer  = null;
 let _onError    = msg => console.error(msg);
 let _onChange   = () => {};
+let _templatesOk = false;   // server has the templates table (last known)
+let _rev         = 0;       // bumps on every cache change, for memoised stats
+
+// PostgREST ≥12.2: PGRST205 "Could not find the table"; older: 42P01; both 404.
+const isMissingTable = (err, status) => status === 404 || ['PGRST205', '42P01'].includes(err?.code);
 
 const outboxKey = () => `gt_outbox_${_userId}`;
 
@@ -45,6 +55,7 @@ function saveOutbox() {
 }
 
 function applyToCache({ table, op, rows, ids }) {
+  _rev++;
   if (op === 'upsert') {
     const list = _cache[table];
     for (const r of rows) {
@@ -82,6 +93,7 @@ function enqueue(op) {
 }
 
 function write(table, rows) {
+  _rev++;
   const full = rows.map(r => {
     const existing = _cache[table].find(x => x.id === r.id);
     if (existing) { Object.assign(existing, r); return existing; }
@@ -141,7 +153,12 @@ async function flush() {
           break;
         }
         console.error('Dropped change that Supabase rejected', op, res.error);
-        _onError(`Couldn't save a change (${op.table}): ${res.error.message}`);
+        if (op.table === TEMPLATES && isMissingTable(res.error, res.status)) {
+          _templatesOk = false;
+          _onError("Templates aren't set up on the server yet — see Profile → Workout templates.");
+        } else {
+          _onError(`Couldn't save a change (${op.table}): ${res.error.message}`);
+        }
       }
       _outbox.shift();
       saveOutbox();
@@ -168,27 +185,44 @@ function scheduleSnapshot() {
 
 function saveSnapshot() {
   if (!_userId) return;
-  snapshotDB.snapshot.put({ userId:_userId, savedAt:new Date().toISOString(), data:JSON.parse(JSON.stringify(_cache)) })
+  snapshotDB.snapshot.put({ userId:_userId, savedAt:new Date().toISOString(), templatesAvailable:_templatesOk, data:JSON.parse(JSON.stringify(_cache)) })
     .catch(e => console.warn('Snapshot save failed', e));
 }
 
 async function fetchTable(table) {
   const rows = [];
   for (let from = 0; ; from += PAGE) {
-    const { data, error } = await supabase.from(table).select('*').order('id').range(from, from + PAGE - 1);
-    if (error) throw error;
+    const { data, error, status } = await supabase.from(table).select('*').order('id').range(from, from + PAGE - 1);
+    if (error) throw Object.assign(error, { status });
     rows.push(...data);
     if (data.length < PAGE) return rows;
   }
 }
 
-async function remoteDeleteAll() {
-  // Children first so the exercises FK (on delete restrict) never blocks.
-  for (const table of ['sets', 'workouts', 'exercises', 'body_weight_logs']) {
-    const { error } = await supabase.from(table).delete().eq('user_id', _userId);
-    if (error) throw error;
+// Optional table → { rows } | { missing:true } (table doesn't exist) |
+// { unavailable:true } (other refusal, e.g. missing grant). Network /
+// server errors still throw so load() can fall back to the snapshot.
+async function fetchOptional(table) {
+  try { return { rows:await fetchTable(table) }; }
+  catch (e) {
+    if (isRetryable(e.status ?? 0)) throw e;
+    console.warn(`${table} unavailable`, e);
+    return isMissingTable(e, e.status) ? { missing:true } : { unavailable:true };
   }
 }
+
+async function remoteDeleteAll() {
+  // Children first so the exercises FK (on delete restrict) never blocks.
+  for (const table of [TEMPLATES, 'sets', 'workouts', 'exercises', 'body_weight_logs']) {
+    const { error, status } = await supabase.from(table).delete().eq('user_id', _userId);
+    if (error && !(table === TEMPLATES && isMissingTable(error, status))) throw error;
+  }
+}
+
+// Template items: [{ exercise_id, sets 1–20 }], other keys kept.
+const cleanTemplateItems = items => (Array.isArray(items) ? items : [])
+  .filter(i => i && typeof i.exercise_id === 'string')
+  .map(i => { const n = Math.round(+i.sets); return { ...i, sets: n >= 1 ? Math.min(n, 20) : 1 }; });
 
 /* ── Public API ─────────────────────────────────────────────── */
 export const DB = {
@@ -199,19 +233,32 @@ export const DB = {
   async load(userId) {
     _userId = userId;
     loadOutbox();
-    let fresh = null, online = false;
+    let fresh = null, online = false, tplOk = false, tplMissing = false;
     try {
       // Weak gym signal shouldn't hang startup: give up and use the snapshot.
       const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('load timed out')), LOAD_TIMEOUT));
-      const results = await Promise.race([Promise.all(TABLES.map(fetchTable)), timeout]);
+      const results = await Promise.race([Promise.all([...TABLES.map(fetchTable), fetchOptional(TEMPLATES)]), timeout]);
       fresh = Object.fromEntries(TABLES.map((t, i) => [t, results[i]]));
+      const tpl = results[TABLES.length];
+      tplOk = !!tpl.rows;
+      tplMissing = !!tpl.missing;
+      fresh[TEMPLATES] = tpl.rows || [];
       online = true;
     } catch (e) {
       console.warn('Supabase unreachable, starting from offline snapshot', e);
       const snap = await snapshotDB.snapshot.get(userId).catch(() => null);
       fresh = snap?.data || {};
+      tplOk = !!snap?.templatesAvailable;
     }
-    for (const t of TABLES) _cache[t] = fresh[t] || [];
+    _templatesOk = tplOk;
+    // The table doesn't exist, so queued template writes can never succeed.
+    if (online && tplMissing && _outbox.some(op => op.table === TEMPLATES)) {
+      console.warn('Dropping queued template changes: templates table missing');
+      _outbox = _outbox.filter(op => op.table !== TEMPLATES);
+      saveOutbox();
+    }
+    _rev++;
+    for (const t of ALL_TABLES) _cache[t] = fresh[t] || [];
     for (const op of _outbox) applyToCache(JSON.parse(JSON.stringify(op)));  // unsent changes
     saveSnapshot();
     if (_outbox.length) scheduleFlush(0);
@@ -225,9 +272,12 @@ export const DB = {
       localStorage.removeItem(outboxKey());
       await snapshotDB.snapshot.delete(_userId).catch(() => {});
     }
-    _userId = null; _outbox = [];
-    for (const t of TABLES) _cache[t] = [];
+    _userId = null; _outbox = []; _templatesOk = false; _rev++;
+    for (const t of ALL_TABLES) _cache[t] = [];
   },
+
+  rev()                { return _rev; },
+  templatesAvailable() { return _templatesOk; },
 
   pendingCount() { return _outbox.reduce((n, op) => n + (op.rows?.length || op.ids?.length || 0), 0); },
   flush,
@@ -256,19 +306,49 @@ export const DB = {
   saveBodyWeightLog(row)   { return write('body_weight_logs', [row])[0]; },
   deleteBodyWeightLog(id)  { remove('body_weight_logs', [id]); },
 
+  getTemplates()    { return _cache.workout_templates.slice().sort((a, b) => a.name.localeCompare(b.name)); },
+  getTemplate(id)   { return _cache.workout_templates.find(t => t.id === id) || null; },
+  // Writes nothing (returns null) when the server has no templates table.
+  saveTemplate(row) {
+    if (!_templatesOk) return null;
+    const r = { ...(DB.getTemplate(row.id) ? {} : { created_at:new Date().toISOString(), exercises:[] }), ...row };
+    if ('name' in r) r.name = String(r.name).trim();
+    if ('exercises' in r) r.exercises = cleanTemplateItems(r.exercises);
+    return write(TEMPLATES, [r])[0];
+  },
+  deleteTemplate(id) { if (_templatesOk) remove(TEMPLATES, [id]); },
+  // jsonb has no FK: strip a deleted exercise from every template.
+  removeExerciseFromTemplates(exId) {
+    if (!_templatesOk) return;
+    const rows = _cache.workout_templates
+      .filter(t => (t.exercises || []).some(i => i.exercise_id === exId))
+      .map(t => ({ id:t.id, exercises:t.exercises.filter(i => i.exercise_id !== exId) }));
+    if (rows.length) write(TEMPLATES, rows);
+  },
+  // After running the SQL: check again without a full reload.
+  async recheckTemplates() {
+    if (_templatesOk) return true;
+    try {
+      const { rows } = await fetchOptional(TEMPLATES);
+      if (rows) { _cache[TEMPLATES] = rows; _templatesOk = true; _rev++; saveSnapshot(); }
+    } catch {}
+    return _templatesOk;
+  },
+
   // ── Online-only bulk operations (bypass the outbox) ──
   async remoteUpsert(table, rows) {
     for (let i = 0; i < rows.length; i += CHUNK) {
       const chunk = rows.slice(i, i + CHUNK).map(r => ({ ...r, user_id:_userId }));
-      const { error } = await supabase.from(table).upsert(chunk);
-      if (error) throw error;
+      const { error, status } = await supabase.from(table).upsert(chunk);
+      if (error) throw Object.assign(error, { status });
     }
   },
 
   async clearAll() {
     _outbox = []; saveOutbox();
     await remoteDeleteAll();
-    for (const t of TABLES) _cache[t] = [];
+    _rev++;
+    for (const t of ALL_TABLES) _cache[t] = [];
     saveSnapshot();
   },
 
@@ -276,7 +356,15 @@ export const DB = {
     _outbox = []; saveOutbox();
     await remoteDeleteAll();
     for (const t of TABLES) await DB.remoteUpsert(t, data[t] || []);
-    return DB.load(_userId);
+    // Backups made before templates existed have no key → no templates.
+    const tpl = (Array.isArray(data[TEMPLATES]) ? data[TEMPLATES] : [])
+      .filter(t => t?.id && String(t.name ?? '').trim())
+      .map(t => ({ ...t, name:String(t.name).trim(), exercises:cleanTemplateItems(t.exercises) }));
+    let templatesSkipped = 0;
+    // Templates are optional: never abort a restore half-way because of them.
+    try { await DB.remoteUpsert(TEMPLATES, tpl); }   // [] sends no request
+    catch (e) { console.error('Templates not restored', e); templatesSkipped = tpl.length; }
+    return { ...(await DB.load(_userId)), templatesSkipped };
   },
 
   backup() {
