@@ -58,10 +58,15 @@ input { font-size: 16px; }
 
 /* ── App shell ─────────────────────────────────────────────────── */
 #app {
+  /* Pin to the full screen: on iOS standalone PWAs 100vh/100dvh can come up
+     short of the physical screen, leaving a gap below the tab bar. */
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--app-height, 100%);
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  height: 100dvh;
   overflow: hidden;
 }
 
@@ -80,7 +85,8 @@ input { font-size: 16px; }
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
   border-top: 1px solid var(--bg3);
-  padding-bottom: var(--safe-bottom);
+  /* Sit closer to the home indicator instead of reserving its full inset */
+  padding-bottom: max(calc(var(--safe-bottom) - 14px), 4px);
   flex-shrink: 0;
 }
 
