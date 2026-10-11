@@ -1757,3 +1757,24 @@ input { font-size: 16px; }
 .ex-session-date { font-size: 15px; font-weight: 700; }
 .ex-session-sets { font-size: 13px; color: var(--fg3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ex-session-best { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ── Past workouts ─────────────────────────────────────────────── */
+.editor-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 12px 16px 0;
+  padding: 14px;
+  background: var(--bg2);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
+}
+.editor-meta.sheet { margin: 0; padding: 0; box-shadow: none; }
+.field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.field > span { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: var(--fg3); padding-left: 4px; }
+.field .text-input { padding: 11px 12px; font-size: 16px; border-radius: var(--radius-md); min-width: 0; width: 100%; }
+.field-wide, .editor-meta .form-error { grid-column: 1 / -1; }
+.dur-pair { display: flex; align-items: center; gap: 6px; color: var(--fg3); font-weight: 600; }
+.dur-pair .text-input { width: 72px; text-align: center; }
+.workout-past-date { font-size: 20px; font-weight: 800; letter-spacing: -0.4px; }
+.week-day[data-action] { cursor: pointer; }

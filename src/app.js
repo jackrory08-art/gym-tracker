@@ -179,6 +179,7 @@ const Router = {
     else if (path === '/workout/new')    { container.innerHTML = renderPicker(); initPicker(); }
     else if (path === '/workout/active') { container.innerHTML = renderActiveWorkout(); startTimer(); }
     else if (path === '/history')        container.innerHTML = renderHistory();
+    else if (Router.matchHistoryEdit(path)) container.innerHTML = renderPastEditor(Router.matchHistoryEdit(path));
     else if (Router.matchHistory(path))  container.innerHTML = renderHistoryDetail(Router.matchHistory(path));
     else if (path === '/library')        container.innerHTML = renderLibrary();
     else if (Router.matchExercise(path)) { container.innerHTML = renderExerciseDetail(Router.matchExercise(path)); drawExerciseChart(); }
@@ -360,7 +361,8 @@ function getWeekStrip(workouts) {
       cls = 'day-future'; dotCls = 'future'; dotInner = playOutline;
     }
 
-    return `<div class="week-day ${cls}">
+    const logPast = cls === 'day-missed' ? ` data-action="log-past" data-date="${localDate(d)}" role="button" aria-label="Log a workout for ${d.toLocaleDateString('en-GB',{weekday:'long'})}"` : '';
+    return `<div class="week-day ${cls}"${logPast}>
       <span class="wday-name">${name}</span>
       <span class="wday-num">${d.getDate()}</span>
       <div class="week-dot ${dotCls}">${dotInner}</div>
@@ -656,6 +658,13 @@ function renderActiveWorkout() {
   return renderWorkoutEditor(workout);
 }
 
+function renderPastEditor(id) {
+  const workout = DB.getWorkout(id);
+  if (!workout) { Router.navigate('/history'); return '<div></div>'; }
+  if (!workout.finished_at) { Router.navigate('/workout/active'); return '<div></div>'; }
+  return renderWorkoutEditor(workout);
+}
+
 // One editor for the active workout and for finished (past) workouts.
 function renderWorkoutEditor(workout) {
   editorCtx = null;
@@ -666,6 +675,35 @@ function renderWorkoutEditor(workout) {
     const ex = DB.getExercise(g.exerciseId);
     return ex ? renderExerciseCard(g, ex, settings, workout) : '';
   }).join('');
+
+  const addBtn = `
+        <button class="add-exercise-btn" data-action="add-exercise" data-wid="${workout.id}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Exercise
+        </button>`;
+
+  if (workout.finished_at) {   // past workout
+    return `
+    <div class="screen">
+      <div class="workout-header-sticky">
+        <div class="workout-header-main">
+          <div class="workout-title">Edit Workout</div>
+          <div class="workout-past-date" id="edit-date-label">${formatDate(parseLocalDate(workout.date))}</div>
+        </div>
+        ${renderLiftedBadge(workout, settings)}
+        <button class="btn btn-primary btn-sm" style="width:auto" data-action="editor-done" data-wid="${workout.id}">Done</button>
+      </div>
+      <div class="editor-meta">
+        ${renderTimesFields('edit', timesOf(workout), `data-action="edit-meta" data-wid="${workout.id}"`)}
+        <div class="form-error" id="edit-error" hidden></div>
+      </div>
+      <div id="exercise-cards">${cards}</div>
+      <div class="workout-actions">
+        ${addBtn}
+        <button class="btn btn-danger" data-action="delete-workout" data-id="${workout.id}">Delete Workout</button>
+      </div>
+    </div>`;
+  }
 
   return `
     <div class="screen">
@@ -679,10 +717,7 @@ function renderWorkoutEditor(workout) {
       </div>
       <div id="exercise-cards">${cards}</div>
       <div class="workout-actions">
-        <button class="add-exercise-btn" data-action="add-exercise" data-wid="${workout.id}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          Add Exercise
-        </button>
+        ${addBtn}
         <button class="btn btn-primary" data-action="finish-workout">Finish Workout</button>
       </div>
     </div>`;
@@ -868,6 +903,94 @@ function refreshExerciseLive(wid, exId) {
 
 function renderRest() {}
 
+/* ── Past workouts ── */
+const hhmm = d => `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+
+function timesOf(w) {
+  const mins = w.started_at && w.finished_at ? Math.round((new Date(w.finished_at) - new Date(w.started_at)) / 60000) : 60;
+  return { date:w.date, time:w.started_at ? hhmm(new Date(w.started_at)) : '12:00', h:Math.floor(mins/60), m:mins%60 };
+}
+
+// Date / start time / duration fields with ids `${prefix}-date|time|dur-h|dur-m`.
+function renderTimesFields(prefix, { date, time, h, m }, attrs = '') {
+  return `
+    <label class="field"><span>Date</span>
+      <input class="text-input" type="date" id="${prefix}-date" value="${date}" max="${localDate()}" ${attrs}></label>
+    <label class="field"><span>Start time</span>
+      <input class="text-input" type="time" id="${prefix}-time" value="${time}" ${attrs}></label>
+    <div class="field field-wide"><span>Duration</span>
+      <div class="dur-pair">
+        <input class="text-input" type="number" inputmode="numeric" min="0" max="23" id="${prefix}-dur-h" value="${h}" aria-label="Hours" ${attrs}> h
+        <input class="text-input" type="number" inputmode="numeric" min="0" max="59" id="${prefix}-dur-m" value="${m}" aria-label="Minutes" ${attrs}> min
+      </div>
+    </div>`;
+}
+
+// → { date, started_at, finished_at } or { error }. date always matches the
+// local day of started_at, so ordering stays consistent everywhere.
+function workoutTimes(date, time, h, m) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error:'Pick a date.' };
+  if (date > localDate()) return { error:'That date is in the future.' };
+  const [hh, mm] = (time || '12:00').split(':').map(Number);
+  const start = parseLocalDate(date);
+  start.setHours(hh || 0, mm || 0, 0, 0);
+  if (start > new Date()) return { error:'That start time is in the future.' };
+  const mins = Math.round((parseFloat(h) || 0) * 60 + (parseFloat(m) || 0));
+  if (!(mins > 0))  return { error:'Enter how long the workout took.' };
+  if (mins > 1440) return { error:'Duration must be under 24 hours.' };
+  return { date, started_at:start.toISOString(), finished_at:new Date(start.getTime() + mins * 60000).toISOString() };
+}
+
+const readTimes = prefix => {
+  const v = id => document.getElementById(`${prefix}-${id}`)?.value ?? '';
+  return workoutTimes(v('date'), v('time'), v('dur-h'), v('dur-m'));
+};
+
+function defaultPastTime(date) {
+  if (date !== localDate()) return '18:00';
+  const d = new Date(Date.now() - 60 * 60000);
+  if (localDate(d) !== date) return '00:00';
+  d.setMinutes(Math.floor(d.getMinutes() / 5) * 5);
+  return hhmm(d);
+}
+
+function showPastWorkoutSheet(date = localDate()) {
+  if (document.getElementById('past-sheet')) return;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'past-sheet';
+  overlay.innerHTML = `
+    <div class="bottom-sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-title">Log Past Workout</div>
+      <div class="editor-meta sheet">
+        ${renderTimesFields('past', { date, time:defaultPastTime(date), h:1, m:0 })}
+        ${renderPastTemplateChoice()}
+      </div>
+      <div class="form-error" id="past-error" hidden></div>
+      <div style="display:flex;gap:8px;margin-top:4px">
+        <button class="btn btn-secondary" data-action="past-cancel">Cancel</button>
+        <button class="btn btn-primary" data-action="past-save">Continue</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  requestAnimationFrame(()=>overlay.classList.add('visible'));
+  overlay.addEventListener('click', e=>{ if (e.target===overlay) closeModal('past-sheet'); });
+}
+
+function renderPastTemplateChoice() { return ''; }
+
+function savePastWorkout() {
+  const r = readTimes('past'), err = document.getElementById('past-error');
+  if (r.error) { err.textContent = r.error; err.hidden = false; return; }
+  const w = DB.saveWorkout({ id:uuid(), notes:null, ...r });   // finished → never "active"
+  addPastTemplateSets(w);
+  closeModal('past-sheet');
+  Router.navigate(`/history/${w.id}/edit`);
+}
+
+function addPastTemplateSets() {}
+
 /* ── History ──────────────────────────────────────────────────── */
 function renderHistory() {
   const workouts = DB.getWorkouts().filter(w=>w.finished_at).sort((a,b)=>workoutTime(b)-workoutTime(a));
@@ -878,6 +1001,7 @@ function renderHistory() {
     ? `<div class="empty-state" style="padding-top:64px">
          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
          <p>No workouts logged yet.</p>
+         <button class="btn btn-secondary btn-sm" style="width:auto;margin-top:12px" data-action="log-past">Log a past workout</button>
        </div>`
     : workouts.map(w=>{
         const sets    = idx.setsByWorkout.get(w.id) || [];
@@ -913,7 +1037,10 @@ function renderHistory() {
           <h1>History</h1>
           <div class="header-sub">${workouts.length} workout${workouts.length!==1?'s':''} logged</div>
         </div>
-        <div class="header-right"><button class="btn-small" data-action="open-export" data-from="/history">Export for AI</button></div>
+        <div class="header-right">
+          <button class="btn-small" data-action="log-past">+ Log Past</button>
+          <button class="btn-small" data-action="open-export" data-from="/history">Export</button>
+        </div>
       </div>
       <div class="history-list">${cards}</div>
     </div>`;
@@ -961,6 +1088,7 @@ function renderHistoryDetail(workoutId) {
           <div class="header-sub">${groups.length} exercise${groups.length!==1?'s':''} · ${sets.length} set${sets.length!==1?'s':''}</div>
         </div>
         <div class="header-right">
+          <button class="btn-ghost" data-action="edit-workout" data-id="${workoutId}">Edit</button>
           <button class="btn-ghost" data-action="back-history">Back</button>
         </div>
       </div>
@@ -1711,7 +1839,7 @@ function showToast(message, ms = 3500) {
 ═══════════════════════════════════════════════════════════════ */
 document.addEventListener('click',  handleClick);
 document.addEventListener('input',  handleInput);
-document.addEventListener('change', e=>{ if (e.target.type==='date') handleInput(e); });
+document.addEventListener('change', e=>{ if (e.target.type==='date' || e.target.type==='time') handleInput(e); });
 document.addEventListener('submit', e=>{
   if (e.target.id==='login-form') { e.preventDefault(); submitLogin(); }
 });
@@ -1980,6 +2108,18 @@ function handleClick(e) {
   }
 
   /* ── History ── */
+  if (action==='log-past')     { showPastWorkoutSheet(btn.dataset.date || localDate()); return; }
+  if (action==='past-cancel')  { closeModal('past-sheet'); return; }
+  if (action==='past-save')    { savePastWorkout(); return; }
+  if (action==='edit-workout') { Router.navigate(`/history/${btn.dataset.id}/edit`); return; }
+  if (action==='editor-done') {
+    const wid = btn.dataset.wid;
+    if (DB.getSetsForWorkout(wid).length) { Router.navigate(`/history/${wid}`); return; }
+    showConfirm('Empty Workout', 'This workout has no exercises. Delete it?', ()=>{
+      DB.deleteWorkout(wid); Router.navigate('/history');
+    }, { confirmLabel:'Delete', cancelLabel:'Keep', onCancel:()=>Router.navigate(`/history/${wid}`) });
+    return;
+  }
   if (action==='back-history') {
     Router.navigate(historyReturn.id === Router.matchHistory(Router.current()) ? historyReturn.to : '/history');
     return;
@@ -2124,6 +2264,19 @@ function handleInput(e) {
     const btn = document.getElementById('weight-save');
     if (btn) btn.textContent = log ? 'Update' : 'Save';
     if (log) document.getElementById('weight-value').value = weightDisplay(log.kg, getSettings());
+    return;
+  }
+
+  if (action==='edit-meta') {
+    const w = DB.getWorkout(el.dataset.wid);
+    if (!w?.finished_at) return;
+    const r = readTimes('edit'), err = document.getElementById('edit-error');
+    if (err) { err.textContent = r.error || ''; err.hidden = !r.error; }
+    if (r.error) return;
+    DB.saveWorkout({ id:w.id, ...r });
+    // A new date/start moves the workout in history: refresh "last time" & PRs.
+    if (e.type === 'change' && (el.type === 'date' || el.type === 'time')) Router.route();
+    else document.getElementById('edit-date-label').textContent = formatDate(parseLocalDate(r.date));
     return;
   }
 
