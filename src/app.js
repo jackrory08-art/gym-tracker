@@ -1665,8 +1665,11 @@ function handleClick(e) {
     const exid = btn.dataset.exid;
     const used = DB.getSets().filter(s=>s.exercise_id===exid).length;
     if (used) { showToast(`Can't delete: used in ${used} logged set${used!==1?'s':''}.`); return; }
-    showConfirm('Delete Exercise', 'Remove this exercise from your library?', ()=>{
+    const tpls = DB.getTemplates().filter(t => (t.exercises||[]).some(i => i.exercise_id === exid)).length;
+    const also = tpls ? ` It will also be removed from ${tpls} template${tpls!==1?'s':''}.` : '';
+    showConfirm('Delete Exercise', `Remove this exercise from your library?${also}`, ()=>{
       DB.deleteExercise(exid);
+      DB.removeExerciseFromTemplates(exid);
       Router.route();
     });
     return;
@@ -1712,7 +1715,7 @@ function handleClick(e) {
   if (action==='import-local') { if (legacyLocal) importLegacy(legacyLocal); return; }
 
   if (action==='clear-all-data') {
-    showConfirm('Clear All Data', 'Permanently delete all your workouts, exercises and weigh-ins from your account?', async ()=>{
+    showConfirm('Clear All Data', 'Permanently delete all your workouts, exercises, templates and weigh-ins from your account?', async ()=>{
       if (!navigator.onLine) { showToast('You need to be online to clear data.'); return; }
       try {
         await DB.clearAll();
@@ -1754,10 +1757,12 @@ function handleClick(e) {
       showConfirm('Restore Backup', 'This replaces ALL data in your account with the backup. Continue?', async ()=>{
         if (!navigator.onLine) { showToast('You need to be online to restore.'); return; }
         try {
-          await DB.replaceAll(data);
+          const { templatesSkipped } = await DB.replaceAll(data);
           migrateMuscleSlugs();
           Router.navigate('/home');
-          showToast('Backup restored.');
+          showToast(templatesSkipped
+            ? `Backup restored, except ${templatesSkipped} template${templatesSkipped!==1?'s':''} — templates aren't set up on the server yet.`
+            : 'Backup restored.', templatesSkipped ? 8000 : 3500);
         } catch (err) {
           showToast('Restore failed: ' + err.message);
         }
