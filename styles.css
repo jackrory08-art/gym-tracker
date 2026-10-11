@@ -32,7 +32,9 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
-  height: 100%;
+  /* Installed iOS PWAs report 100% / 100dvh shorter than the screen, which
+     leaves a "chin" gap at the bottom; 100vh reaches the real bottom edge. */
+  height: 100vh;
   background: var(--bg);
   color: var(--fg);
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
@@ -58,9 +60,7 @@ input { font-size: 16px; }
 
 /* ── App shell ─────────────────────────────────────────────────── */
 #app {
-  /* Fill exactly the area iOS gives the app, whatever 100vh/100dvh report */
-  position: fixed;
-  inset: 0;
+  height: 100vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -85,8 +85,6 @@ input { font-size: 16px; }
   padding-bottom: max(calc(var(--safe-bottom) - 14px), 4px);
   flex-shrink: 0;
 }
-
-.short-viewport .tab-bar { padding-bottom: 0; }
 
 .tab-btn {
   flex: 1;
