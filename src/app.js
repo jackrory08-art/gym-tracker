@@ -139,32 +139,30 @@ const Router = {
 
   route() {
     const path      = Router.current();
-    const tabBar    = document.getElementById('tab-bar');
     const container = document.getElementById('view-container');
 
     if (!session && !PUBLIC_ROUTES.includes(path)) { Router.navigate('/login'); return; }
 
     if (path === '/login') {
       if (session) { Router.navigate('/home'); return; }
-      tabBar.hidden = true;
+      setTabBar(false);
       container.innerHTML = renderLogin();
       return;
     }
 
     if (path === '/onboarding') {
-      tabBar.hidden = true;
+      setTabBar(false);
       container.innerHTML = renderOnboarding();
       return;
     }
 
     if (path === '/target') {
-      tabBar.hidden = true;
+      setTabBar(false);
       container.innerHTML = renderTarget();
       return;
     }
 
-    tabBar.hidden = false;
-    updateTabBar(path);
+    setTabBar(true, path);
 
     if      (path === '/home')           container.innerHTML = renderHome();
     else if (path === '/workout/new')    { container.innerHTML = renderPicker(); initPicker(); }
@@ -178,6 +176,14 @@ const Router = {
     else Router.navigate('/home');
   },
 };
+
+// The floating bar overlays content; body.has-tabbar pads the scroller,
+// and lifts the toast / FAB / rest pill above it.
+function setTabBar(visible, path) {
+  document.getElementById('tab-bar').hidden = !visible;
+  document.body.classList.toggle('has-tabbar', visible);
+  if (visible) updateTabBar(path);
+}
 
 function updateTabBar(path) {
   document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -226,7 +232,7 @@ function updateMuscleHighlights() {
 
 /* ── Config missing / loading ─────────────────────────────────── */
 function renderConfigMissing() {
-  document.getElementById('tab-bar').hidden = true;
+  setTabBar(false);
   document.getElementById('view-container').innerHTML = `
     <div class="onboarding-screen">
       <div>
@@ -238,7 +244,7 @@ function renderConfigMissing() {
 }
 
 function renderLoading() {
-  document.getElementById('tab-bar').hidden = true;
+  setTabBar(false);
   document.getElementById('view-container').innerHTML = `
     <div class="onboarding-screen loading-screen"><div class="spinner"></div></div>`;
 }
@@ -304,6 +310,12 @@ function getGreeting() {
   if (h < 12) return 'Good morning';
   if (h < 17) return 'Good afternoon';
   return 'Good evening';
+}
+
+function renderProfileBubble() {
+  const initial = [...userName().trim()][0]?.toUpperCase();   // spread: emoji-safe
+  const person = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
+  return `<button class="profile-bubble" data-action="nav-tab" data-tab="settings" aria-label="Profile">${initial ? escHtml(initial) : person}</button>`;
 }
 
 function getWeekStrip(workouts) {
@@ -391,8 +403,11 @@ function renderHome() {
   return `
     <div class="screen">
       <div class="home-header">
-        <div class="home-greeting">${getGreeting()}, ${escHtml(userName() || 'there')}</div>
-        <div class="home-sub">Ready to crush it?</div>
+        <div class="home-header-text">
+          <div class="home-greeting">${getGreeting()}, ${escHtml(userName() || 'there')}</div>
+          <div class="home-sub">Ready to crush it?</div>
+        </div>
+        ${renderProfileBubble()}
       </div>
       <div class="scroll-content" style="gap:16px;padding-top:20px">
 

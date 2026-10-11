@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'gym-tracker-v3';
+const CACHE_VERSION = 'gym-tracker-v4';
 const SHELL_ASSETS = ['/', '/index.html', '/manifest.json', '/icons/icon.svg'];
 
 self.addEventListener('install', event => {
