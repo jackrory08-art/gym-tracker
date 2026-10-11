@@ -133,14 +133,20 @@ const Router = {
 
   current() { return window.location.hash.slice(1) || '/home'; },
 
-  matchHistory(path) { const m=path.match(/^\/history\/(.+)$/); return m?m[1]:null; },
+  matchHistory(path)     { const m=path.match(/^\/history\/([^/]+)$/);      return m?m[1]:null; },
+  matchHistoryEdit(path) { const m=path.match(/^\/history\/([^/]+)\/edit$/); return m?m[1]:null; },
+  matchTemplate(path)    { const m=path.match(/^\/templates\/([^/]+)$/);     return m?m[1]:null; },
+  matchExercise(path)    { const m=path.match(/^\/exercise\/([^/]+)$/);      return m?m[1]:null; },
 
   init() {
     window.addEventListener('hashchange', ()=>Router.route());
     Router.route();
   },
 
-  route() {
+  // Every route change also refreshes the floating rest-timer pill.
+  route() { Router.render(); renderRest(); },
+
+  render() {
     const path      = Router.current();
     const container = document.getElementById('view-container');
 
@@ -189,15 +195,17 @@ function setTabBar(visible, path) {
 }
 
 function updateTabBar(path) {
+  // The picker belongs to whatever opened it (a past workout → History).
+  const p = path === '/workout/new' && pickerState.returnTo ? pickerState.returnTo : path;
   document.querySelectorAll('.tab-btn').forEach(btn => {
     const tab = btn.dataset.tab;
     btn.classList.toggle('active',
-      (tab === 'home'     && path === '/home') ||
-      (tab === 'workout'  && path.startsWith('/workout')) ||
-      (tab === 'library'  && path === '/library') ||
-      (tab === 'history'  && (path === '/history' || path.startsWith('/history/'))) ||
-      (tab === 'progress' && path === '/progress') ||
-      (tab === 'settings' && path === '/settings')
+      (tab === 'home'     && p === '/home') ||
+      (tab === 'workout'  && (p.startsWith('/workout') || p.startsWith('/templates'))) ||
+      (tab === 'library'  && (p === '/library' || p.startsWith('/exercise/'))) ||
+      (tab === 'history'  && p.startsWith('/history')) ||
+      (tab === 'progress' && p === '/progress') ||
+      (tab === 'settings' && p === '/settings')
     );
   });
 }
@@ -496,7 +504,10 @@ function renderTarget() {
 const freshPickerState = () => ({
   search:'', category:'all', bodyRegion:'all',
   showCustomForm:false, customName:'', customCat:'strength',
-  selectedMuscles:[], bodyView:'front'
+  selectedMuscles:[], bodyView:'front',
+  // Where picked exercises go: null = the active workout (created on first
+  // add), or { kind:'workout'|'template', id }. returnTo = where to go after.
+  target:null, returnTo:null,
 });
 let pickerState = freshPickerState();
 
@@ -638,13 +649,17 @@ function startTimer() {
 function renderActiveWorkout() {
   const workout = DB.getActiveWorkout();
   if (!workout) { Router.navigate('/home'); return '<div></div>'; }
+  return renderWorkoutEditor(workout);
+}
 
+// One editor for the active workout and for finished (past) workouts.
+function renderWorkoutEditor(workout) {
   const groups   = groupSets(DB.getSetsForWorkout(workout.id));
   const settings = getSettings();
 
   const cards = groups.map(g=>{
     const ex = DB.getExercise(g.exerciseId);
-    return ex ? renderExerciseCard(g, ex, settings) : '';
+    return ex ? renderExerciseCard(g, ex, settings, workout) : '';
   }).join('');
 
   return `
@@ -658,7 +673,7 @@ function renderActiveWorkout() {
       </div>
       <div id="exercise-cards">${cards}</div>
       <div class="workout-actions">
-        <button class="add-exercise-btn" data-action="add-exercise">
+        <button class="add-exercise-btn" data-action="add-exercise" data-wid="${workout.id}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           Add Exercise
         </button>
@@ -667,7 +682,7 @@ function renderActiveWorkout() {
     </div>`;
 }
 
-function renderExerciseCard(group, ex, settings) {
+function renderExerciseCard(group, ex, settings, workout, ctx = {}) {
   const headerCols = ex.type==='strength'
     ? '<span>#</span><span>Weight</span><span></span><span>Reps</span><span>✓</span>'
     : ex.type==='bodyweight' ? '<span>#</span><span>Reps</span><span>✓</span>'
@@ -682,7 +697,7 @@ function renderExerciseCard(group, ex, settings) {
           ${muscles ? `<div style="font-size:12px;color:var(--fg3);margin-top:2px">${muscles}</div>` : ''}
         </div>
         <span class="exercise-card-badge badge-${ex.type}">${categoryLabel(ex.type)}</span>
-        <button class="btn-icon" data-action="remove-exercise" data-exid="${ex.id}" aria-label="Remove">
+        <button class="btn-icon" data-action="remove-exercise" data-wid="${workout.id}" data-exid="${ex.id}" aria-label="Remove">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
@@ -692,7 +707,7 @@ function renderExerciseCard(group, ex, settings) {
           ${group.sets.map((s,i)=>renderSetRow(s,i,ex.type,settings)).join('')}
         </div>
       </div>
-      <button class="add-set-btn" data-action="add-set" data-exid="${ex.id}">
+      <button class="add-set-btn" data-action="add-set" data-wid="${workout.id}" data-exid="${ex.id}">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         Add Set
       </button>
@@ -732,6 +747,8 @@ function renderSetRow(set, idx, type, settings) {
     ${checkBtn}
   </div>`;
 }
+
+function renderRest() {}
 
 /* ── History ──────────────────────────────────────────────────── */
 function renderHistory() {
@@ -1471,7 +1488,7 @@ function handleClick(e) {
   /* ── Tab nav ── */
   if (action==='nav-tab') {
     const tab = btn.dataset.tab;
-    if (tab === 'workout') Router.navigate(DB.getActiveWorkout() ? '/workout/active' : '/workout/new');
+    if (tab === 'workout') { if (DB.getActiveWorkout()) Router.navigate('/workout/active'); else openStart(); }
     else Router.navigate(`/${tab}`);
     return;
   }
@@ -1481,9 +1498,9 @@ function handleClick(e) {
     const active = DB.getActiveWorkout();
     if (active) {
       showConfirm('Discard', 'A workout is already in progress. Discard it?', ()=>{
-        DB.deleteWorkout(active.id); createAndStartWorkout();
+        DB.deleteWorkout(active.id); openStart();
       });
-    } else createAndStartWorkout();
+    } else openStart();
     return;
   }
   if (action==='resume-workout') { Router.navigate('/workout/active'); return; }
@@ -1608,7 +1625,7 @@ function handleClick(e) {
   }
 
   /* ── Picker ── */
-  if (action==='picker-close') { Router.navigate(DB.getActiveWorkout()?'/workout/active':'/home'); return; }
+  if (action==='picker-close') { Router.navigate(pickerState.returnTo || (DB.getActiveWorkout()?'/workout/active':'/home')); return; }
 
   if (action==='picker-region') {
     pickerState.bodyRegion = btn.dataset.region;
@@ -1624,12 +1641,7 @@ function handleClick(e) {
     return;
   }
 
-  if (action==='picker-add') {
-    const exId = btn.dataset.exid;
-    if (!DB.getActiveWorkout()) createAndStartWorkout(()=>addExerciseToWorkout(exId));
-    else addExerciseToWorkout(exId);
-    return;
-  }
+  if (action==='picker-add') { pickerAdd(btn.dataset.exid); return; }
 
   if (action==='custom-form-show') { pickerState.showCustomForm=true; Router.route(); return; }
   if (action==='custom-cancel')    { pickerState.showCustomForm=false; Router.route(); return; }
@@ -1655,14 +1667,14 @@ function handleClick(e) {
 
   /* ── Active workout ── */
   if (action==='add-exercise') {
-    pickerState = freshPickerState();
-    Router.navigate('/workout/new');
+    const wid = btn.dataset.wid;
+    openPicker({ kind:'workout', id:wid }, editorPath(wid));
     return;
   }
 
-  if (action==='add-set') { addSetToExercise(btn.dataset.exid); return; }
+  if (action==='add-set') { addSetToExercise(btn.dataset.wid, btn.dataset.exid); return; }
   if (action==='toggle-set') { toggleSet(btn.dataset.setid); return; }
-  if (action==='remove-exercise') { removeExerciseFromWorkout(btn.dataset.exid); return; }
+  if (action==='remove-exercise') { removeExerciseFromWorkout(btn.dataset.wid, btn.dataset.exid); return; }
 
   if (action==='finish-workout') {
     const workout = DB.getActiveWorkout();
@@ -1860,34 +1872,57 @@ function handleInput(e) {
 /* ═══════════════════════════════════════════════════════════════
    WORKOUT OPERATIONS
 ═══════════════════════════════════════════════════════════════ */
-function createAndStartWorkout(cb) {
+function createWorkout(fields = {}) {
   const now = new Date();
-  DB.saveWorkout({ id:uuid(), date:localDate(now), notes:null, started_at:now.toISOString(), finished_at:null });
-  if (cb) cb(); else Router.navigate('/workout/new');
+  return DB.saveWorkout({ id:uuid(), date:localDate(now), notes:null, started_at:now.toISOString(), finished_at:null, ...fields });
 }
+
+const editorPath   = wid => DB.getWorkout(wid)?.finished_at ? `/history/${wid}/edit` : '/workout/active';
+const nextPosition = wid => Math.max(0, ...DB.getSetsForWorkout(wid).map(s=>s.position)) + 1;
 
 const METRIC_FIELDS = ['reps','weight_kg','duration_s','distance_m','calories','elevation_gain_m'];
 
-function makeSet(workoutId, exerciseId, copyFrom = null) {
-  const position = Math.max(0, ...DB.getSetsForWorkout(workoutId).map(s=>s.position)) + 1;
+// position is explicit for bulk inserts (nothing is saved until the end).
+function makeSet(workoutId, exerciseId, copyFrom = null, { position = nextPosition(workoutId) } = {}) {
   const set = { id:uuid(), workout_id:workoutId, exercise_id:exerciseId, position, completed:false };
   for (const f of METRIC_FIELDS) set[f] = copyFrom ? copyFrom[f] ?? null : null;
   return set;
 }
 
-function addExerciseToWorkout(exId) {
-  const workout = DB.getActiveWorkout();
-  if (!workout || !DB.getExercise(exId)) return;
-  DB.saveSets([makeSet(workout.id, exId)]);
-  Router.navigate('/workout/active');
+function openPicker(target = null, returnTo = null) {
+  pickerState = freshPickerState();
+  pickerState.target = target;
+  pickerState.returnTo = returnTo;
+  Router.navigate('/workout/new');
 }
 
-function addSetToExercise(exId) {
-  const workout = DB.getActiveWorkout();
+// Start a workout from scratch: the workout is created when the first
+// exercise is picked, so backing out leaves nothing behind.
+function openStart() { openPicker(null, null); }
+
+function pickerAdd(exId) {
+  const t = pickerState.target;
+  let wid = t?.kind === 'workout' ? t.id : DB.getActiveWorkout()?.id;
+  if (wid && !DB.getWorkout(wid)) wid = null;
+  if (!wid) {
+    if (t?.kind === 'workout') { Router.navigate('/history'); return; }   // it was deleted elsewhere
+    wid = createWorkout().id;
+  }
+  addExerciseToWorkout(wid, exId);
+  Router.navigate(pickerState.returnTo || editorPath(wid));
+}
+
+function addExerciseToWorkout(wid, exId) {
+  if (!DB.getWorkout(wid) || !DB.getExercise(exId)) return;
+  DB.saveSets([makeSet(wid, exId)]);
+}
+
+function addSetToExercise(wid, exId) {
+  const workout = DB.getWorkout(wid);
   const ex      = DB.getExercise(exId);
   if (!workout || !ex) return;
-  const existing = DB.getSetsForWorkout(workout.id).filter(s=>s.exercise_id===exId);
-  const [set]    = DB.saveSets([makeSet(workout.id, exId, existing[existing.length-1])]);
+  const existing = DB.getSetsForWorkout(wid).filter(s=>s.exercise_id===exId);
+  const [set]    = DB.saveSets([makeSet(wid, exId, existing[existing.length-1])]);
   const container = document.querySelector(`.set-rows[data-exid="${exId}"]`);
   if (container) container.insertAdjacentHTML('beforeend', renderSetRow(set, existing.length, ex.type, getSettings()));
 }
@@ -1900,10 +1935,9 @@ function toggleSet(setId) {
   document.querySelector(`.set-check[data-setid="${setId}"]`)?.classList.toggle('done', set.completed);
 }
 
-function removeExerciseFromWorkout(exId) {
-  const workout = DB.getActiveWorkout();
-  if (!workout) return;
-  DB.deleteSets(DB.getSetsForWorkout(workout.id).filter(s=>s.exercise_id===exId).map(s=>s.id));
+function removeExerciseFromWorkout(wid, exId) {
+  if (!DB.getWorkout(wid)) return;
+  DB.deleteSets(DB.getSetsForWorkout(wid).filter(s=>s.exercise_id===exId).map(s=>s.id));
   document.querySelector(`.exercise-card[data-exid="${exId}"]`)?.remove();
 }
 
