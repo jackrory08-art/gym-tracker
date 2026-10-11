@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Read(//c/Users/Rory7/AppData/Local/Temp/claude/C--Users-Rory7-Desktop-Gym-Tracker/9c8cc508-46eb-4f14-9411-f6551013ec45/scratchpad/**)",
+      "Bash(node test-legacy.mjs \"C:/Users/Rory7/Desktop/Gym Tracker\")"
+    ]
+  }
+}
